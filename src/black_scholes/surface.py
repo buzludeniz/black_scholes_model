@@ -46,6 +46,7 @@ import itertools
 import math
 from collections.abc import Sequence
 from dataclasses import dataclass
+from typing import Literal
 
 import numpy as np
 from scipy.optimize import least_squares
@@ -525,11 +526,14 @@ class SVIFit:
         return max(abs(m - f) for m, f in zip(self.market_vols, self.model_vols, strict=True))
 
 
-def _svi_residuals(params: np.ndarray, k: np.ndarray, w: np.ndarray) -> np.ndarray:
+def _svi_residuals(
+    params: np.ndarray, k: np.ndarray, w: np.ndarray, scale: np.ndarray
+) -> np.ndarray:
     a, b, rho, m, sigma = (float(x) for x in params)
     shifted = k - m
     root = np.sqrt(shifted * shifted + sigma * sigma)
-    residual: np.ndarray = np.asarray(a + b * (rho * shifted + root) - w)
+    raw: np.ndarray = np.asarray(a + b * (rho * shifted + root) - w)
+    residual: np.ndarray = scale * raw
     return residual
 
 
@@ -541,6 +545,7 @@ def fit_svi(
     *,
     check_butterfly: bool = True,
     max_vol_error: float | None = 0.10,
+    weights: Literal["uniform", "vega"] = "vega",
 ) -> SVIFit:
     """Fit an SVI slice to implied volatilities.
 
@@ -562,6 +567,15 @@ def fit_svi(
             This bound is what stops such a result being reported as a
             successful fit. A real single-expiry smile fits to well under one
             volatility point, so the default of 0.10 is already loose.
+        weights: How strikes are weighted in the least-squares objective.
+            ``"vega"`` (the default) weights each strike by its Black-Scholes
+            vega, so ATM and near-ATM quotes — where the price estimate is
+            most sensitive — dominate, and deep out-of-the-money crus with
+            wide, unstable implied-volatility errors do not skew the fit.
+            ``"uniform"`` weights every strike equally, which was the only
+            behaviour before this option existed. The reported
+            ``SVIFit.rms_error`` and ``SVIFit.max_error`` are always measured
+            in raw implied-volatility terms, regardless of this choice.
 
     Returns:
         An :class:`SVIFit` holding the curve and its errors.
@@ -688,6 +702,28 @@ def fit_svi(
         np.array([10.0, 5.0, 0.999, 2.0, 3.0]),
     )
 
+    # Compute weights for the least-squares objective.
+    # Vega weights are based on Black-Scholes vega at the initial mean volatility.
+    # This gives more weight to ATM/near-ATM strikes where implied vol is
+    # more precisely measured, and less weight to deep OTM/ITM strikes.
+    if weights == "vega":
+        # Use initial mean volatility as reference for vega weights
+        v_init = float(np.mean(v_arr))
+        # Black-Scholes vega for each strike: proportional to forward * sqrt(T) * phi(d1)
+        # d1 = (log(F/K) + 0.5 * v^2 * T) / (v * sqrt(T))
+        # vega is proportional to forward * sqrt(maturity) * phi(d1)
+        sqrt_T = math.sqrt(maturity)
+        log_moneyness = np.log(forward / k_arr)
+        d1 = (log_moneyness + 0.5 * v_init * v_init * maturity) / (v_init * sqrt_T)
+        # Standard normal PDF: phi(d1) = exp(-d1^2/2) / sqrt(2*pi)
+        phi_d1 = np.exp(-0.5 * d1 * d1) / math.sqrt(2.0 * math.pi)
+        # Vega weight proportional to forward * sqrt(T) * phi(d1)
+        # Normalize so mean weight is 1 to keep cost function scale similar
+        scale = forward * sqrt_T * phi_d1
+        scale = scale / float(np.mean(scale))
+    else:
+        scale = np.ones_like(k_arr)
+
     best_cost = math.inf
     best_params: np.ndarray | None = None
 
@@ -704,7 +740,7 @@ def fit_svi(
                         _svi_residuals,
                         guess,
                         bounds=bounds,
-                        args=(k, w),
+                        args=(k, w, scale),
                         method="trf",
                         max_nfev=20000,
                     )
@@ -1035,13 +1071,22 @@ class VolSurface:
 
         return points[-1][1]
 
-    def fit(self, *, check_butterfly: bool = True, max_vol_error: float | None = 0.10) -> SVIFit:
+    def fit(
+        self,
+        *,
+        check_butterfly: bool = True,
+        max_vol_error: float | None = 0.10,
+        weights: Literal["uniform", "vega"] = "vega",
+    ) -> SVIFit:
         """Fit an SVI slice to this smile's implied volatilities.
 
         Args:
             check_butterfly: Reject a fit that violates the density condition.
             max_vol_error: Largest tolerated error at any quoted strike.
                 ``None`` disables the bound.
+            weights: How strikes are weighted in the least-squares objective.
+                ``"vega"`` (default) weights by Black-Scholes vega; ``"uniform"``
+                weights all strikes equally.
 
         Raises:
             SVIError: If fewer than four strikes are quoted, or no acceptable
@@ -1061,13 +1106,19 @@ class VolSurface:
             self.time_to_maturity,
             check_butterfly=check_butterfly,
             max_vol_error=max_vol_error,
+            weights=weights,
         )
 
-    def fit_relaxed(self) -> SVIFit:
+    def fit_relaxed(self, *, weights: Literal["uniform", "vega"] = "vega") -> SVIFit:
         """Fit without the butterfly or error-tolerance guards.
 
         Lets a rejected fit be inspected rather than silently dropped, so the
         rejection is visible.
+
+        Args:
+            weights: How strikes are weighted in the least-squares objective.
+                ``"vega"`` (default) weights by Black-Scholes vega; ``"uniform"``
+                weights all strikes equally.
 
         >>> surface = VolSurface.from_market_prices(
         ...     100.0, [70.0, 90.0, 100.0, 110.0, 150.0],
@@ -1076,4 +1127,4 @@ class VolSurface:
         >>> surface.fit_relaxed().curve.parameters_are_valid()
         True
         """
-        return self.fit(check_butterfly=False, max_vol_error=None)
+        return self.fit(check_butterfly=False, max_vol_error=None, weights=weights)

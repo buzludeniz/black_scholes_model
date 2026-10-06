@@ -7,7 +7,7 @@ from __future__ import annotations
 import json
 import math
 from enum import Enum
-from typing import Annotated, NoReturn, cast
+from typing import Annotated, Literal, NoReturn, cast
 
 import typer
 from rich.console import Console
@@ -405,6 +405,10 @@ def fit_surface(
     relaxed: Annotated[
         bool, typer.Option("--relaxed", help="Fit even if the butterfly check fails")
     ] = False,
+    weights: Annotated[
+        str,
+        typer.Option("--weights", "-w", help="Weighting scheme: uniform or vega (default: vega)"),
+    ] = "vega",
     format: Annotated[
         OutputFormat, typer.Option("--format", "-f", help="Output format")
     ] = OutputFormat.TEXT,
@@ -430,8 +434,17 @@ def fit_surface(
     except (SVIError, ValueError, TypeError) as exc:
         _fail(str(exc))
 
+    # Parse weights option
+    if weights not in ("vega", "uniform"):
+        _fail(f"weights must be 'vega' or 'uniform', got {weights!r}")
+
+    weight_mode = cast(Literal["uniform", "vega"], weights)
     try:
-        fit = surface.fit_relaxed() if relaxed else surface.fit()
+        fit = (
+            surface.fit_relaxed(weights=weight_mode)
+            if relaxed
+            else surface.fit(weights=weight_mode)
+        )
     except (SVIError, ValueError) as exc:
         console.print(f"[red]Error:[/red] {exc}")
         # --relaxed bypasses only the butterfly rejection and the
@@ -461,6 +474,7 @@ def fit_surface(
                         "parameters": curve.parameters_are_valid(),
                         "butterfly": curve.butterfly_arbitrage_free(),
                     },
+                    "weights": weights,
                     "strikes": list(fit.strikes),
                     "market_vols": list(fit.market_vols),
                     "model_vols": list(fit.model_vols),

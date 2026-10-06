@@ -84,6 +84,7 @@ class TestFitSurfaceSuccess:
             "rms_error",
             "max_error",
             "arbitrage_free",
+            "weights",
             "strikes",
             "market_vols",
             "model_vols",
