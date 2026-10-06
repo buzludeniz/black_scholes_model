@@ -180,7 +180,8 @@ of vanishing.
 ```bash
 pip install -e ".[dev]"
 
-pytest                       # tests plus doctests, with an 85% coverage gate
+pytest                       # tests plus doctests, prints coverage
+pytest --cov-fail-under=85   # the same, enforcing the CI coverage gate
 ruff check . && ruff format --check .
 mypy src/black_scholes
 python -m build              # wheel and sdist
@@ -193,6 +194,11 @@ python examples/basic_usage.py
 
 Current state: 349 tests pass, 97% branch coverage, with ruff and mypy clean.
 Every source module is above 91%; the GUI is at 100%.
+
+The coverage gate is enforced by CI, not by pytest `addopts`. A gate in
+`addopts` also applies to partial runs, so `pytest tests/test_gui.py` and even
+`pytest --collect-only` would report failure for a suite that is entirely green.
+Coverage is still measured on every local run; only the pass/fail decision moved.
 
 ## Known gaps
 

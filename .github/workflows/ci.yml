@@ -50,13 +50,18 @@ jobs:
       # coverage to roughly 70% and fails the 85% gate. xvfb is preinstalled on
       # the Ubuntu images, so the Linux leg runs against a virtual framebuffer
       # to keep the GUI tests and the coverage gate meaningful.
+      # The coverage gate is passed on the command line rather than sitting in
+      # pytest addopts. A gate in addopts also applies to partial runs, so
+      # `pytest tests/test_gui.py` and even `pytest --collect-only` would report
+      # failure for a suite that is entirely green. Coverage is still measured on
+      # every local run; only the pass/fail decision is scoped to CI.
       - name: Run tests, doctests, and the coverage gate (Linux, under Xvfb)
         if: runner.os == 'Linux'
-        run: xvfb-run -a python -m pytest
+        run: xvfb-run -a python -m pytest --cov-fail-under=85
 
       - name: Run tests, doctests, and the coverage gate (Windows)
         if: runner.os == 'Windows'
-        run: python -m pytest
+        run: python -m pytest --cov-fail-under=85
 
   lint:
     name: lint

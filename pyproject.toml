@@ -66,8 +66,12 @@ addopts = [
     "--cov=black_scholes",
     "--cov-report=term-missing",
     "--cov-report=xml",
-    "--cov-fail-under=85",
 ]
+# The coverage gate is NOT in addopts. A gate here fails every partial run --
+# `pytest tests/test_gui.py` or even `pytest --collect-only` cannot reach the
+# target, so it would report red for a green suite. The gate lives in
+# .github/workflows/ci.yml, where the full suite is what actually runs.
+# Locally, `pytest --cov-fail-under=85` reproduces it.
 filterwarnings = ["error::DeprecationWarning"]
 
 [tool.coverage.run]
