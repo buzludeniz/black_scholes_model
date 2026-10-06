@@ -5,8 +5,9 @@ Command-line interface for Black-Scholes pricer.
 from __future__ import annotations
 
 import json
+import math
 from enum import Enum
-from typing import Annotated, cast
+from typing import Annotated, NoReturn, cast
 
 import typer
 from rich.console import Console
@@ -35,6 +36,72 @@ console = Console(legacy_windows=False, safe_box=True)
 class OutputFormat(str, Enum):
     TEXT = "text"
     JSON = "json"
+
+
+def _fail(message: str) -> NoReturn:
+    """Print a readable error and exit non-zero.
+
+    Every command funnels its failures through here, so a bad input surfaces as
+    one clear line instead of a traceback.
+    """
+    console.print(f"[red]Error:[/red] {message}")
+    raise typer.Exit(1)
+
+
+def _parse_float_list(raw: str, name: str) -> list[float]:
+    """Parse a comma-separated list of numbers, naming the entry that failed.
+
+    Raises:
+        typer.Exit: Via :func:`_fail` if an entry is empty, unparseable, or
+            non-finite.
+    """
+    values: list[float] = []
+    for item in raw.split(","):
+        item = item.strip()
+        if not item:
+            _fail(f"{name} contains an empty entry; expected comma-separated numbers")
+        try:
+            value = float(item)
+        except ValueError:
+            _fail(f"{name} must be comma-separated numbers, got {item!r}")
+        if not math.isfinite(value):
+            _fail(f"{name} must be finite numbers, got {item!r}")
+        values.append(value)
+    if not values:
+        _fail(f"{name} must not be empty")
+    return values
+
+
+def _build_params(
+    *,
+    spot: float,
+    strike: float,
+    time_to_maturity: float,
+    risk_free_rate: float,
+    volatility: float,
+    option_type: OptionType,
+    dividend_yield: float,
+) -> OptionParams:
+    """Build :class:`OptionParams`, turning domain errors into CLI errors.
+
+    The pricing layer raises ``ValueError``. Left uncaught that reaches the
+    terminal as a traceback, so every command goes through this helper.
+
+    Raises:
+        typer.Exit: Via :func:`_fail` if any parameter is invalid.
+    """
+    try:
+        return OptionParams(
+            spot=spot,
+            strike=strike,
+            time_to_maturity=time_to_maturity,
+            risk_free_rate=risk_free_rate,
+            volatility=volatility,
+            option_type=option_type,
+            dividend_yield=dividend_yield,
+        )
+    except (ValueError, TypeError) as exc:
+        _fail(str(exc))
 
 
 def _parse_option_type(value: str) -> OptionType:
@@ -67,7 +134,7 @@ def price(
 ) -> None:
     """Price a European option with full Greeks."""
     opt = cast(OptionType, option_type)
-    params = OptionParams(
+    params = _build_params(
         spot=spot,
         strike=strike,
         time_to_maturity=time,
@@ -158,7 +225,7 @@ def iv(
     ] = OutputFormat.TEXT,
 ) -> None:
     """Calculate implied volatility from market price."""
-    params = OptionParams(
+    params = _build_params(
         spot=spot,
         strike=strike,
         time_to_maturity=time,
@@ -201,7 +268,7 @@ def surface(
     div_yield: Annotated[float, typer.Option("--div-yield", "-q", help="Dividend yield")] = 0.0,
 ) -> None:
     """Generate a volatility smile / price surface across strikes."""
-    strike_list = [float(k.strip()) for k in strikes.split(",")]
+    strike_list = _parse_float_list(strikes, "strikes")
 
     table = Table(title=f"Option Surface (S={spot}, T={time}, r={rate:.2%}, vol={vol:.2%})")
     table.add_column("Strike", justify="right")
@@ -213,15 +280,34 @@ def surface(
     table.add_column("IV (Put)", justify="right")
 
     for K in strike_list:
-        call_params = OptionParams(spot, K, time, rate, vol, OptionType.CALL, div_yield)
-        put_params = OptionParams(spot, K, time, rate, vol, OptionType.PUT, div_yield)
+        call_params = _build_params(
+            spot=spot,
+            strike=K,
+            time_to_maturity=time,
+            risk_free_rate=rate,
+            volatility=vol,
+            option_type=OptionType.CALL,
+            dividend_yield=div_yield,
+        )
+        put_params = _build_params(
+            spot=spot,
+            strike=K,
+            time_to_maturity=time,
+            risk_free_rate=rate,
+            volatility=vol,
+            option_type=OptionType.PUT,
+            dividend_yield=div_yield,
+        )
 
         call_res = price_option(call_params)
         put_res = price_option(put_params)
 
         # IV from own price (should equal input vol)
-        call_iv = implied_volatility(call_res.price, call_params)
-        put_iv = implied_volatility(put_res.price, put_params)
+        try:
+            call_iv = implied_volatility(call_res.price, call_params)
+            put_iv = implied_volatility(put_res.price, put_params)
+        except ValueError as exc:
+            _fail(f"strike {K:g}: {exc}")
 
         table.add_row(
             f"{K:.2f}",
@@ -252,7 +338,7 @@ def greeks(
 ) -> None:
     """Display Greeks with detailed explanations."""
     opt = cast(OptionType, option_type)
-    params = OptionParams(
+    params = _build_params(
         spot=spot,
         strike=strike,
         time_to_maturity=time,
@@ -312,13 +398,13 @@ def fit_surface(
     ] = OutputFormat.TEXT,
 ) -> None:
     """Fit an SVI volatility smile to a set of quoted option prices."""
-    try:
-        strike_list = [float(x) for x in strikes.split(",")]
-        price_list = [float(x) for x in prices.split(",")]
-    except ValueError:
-        console.print("[red]Error:[/red] strikes and prices must be comma-separated numbers")
-        raise typer.Exit(1) from None
+    strike_list = _parse_float_list(strikes, "strikes")
+    price_list = _parse_float_list(prices, "prices")
 
+    # Building the surface and fitting it are separated because they fail for
+    # different reasons, and only a fitting failure can be forced through with
+    # --relaxed. A bad quote is rejected either way, so advertising that hint
+    # there would be misleading.
     try:
         surface = VolSurface.from_market_prices(
             spot=spot,
@@ -329,8 +415,12 @@ def fit_surface(
             dividend_yield=div_yield,
             option_type=cast(OptionType, option_type),
         )
+    except (SVIError, ValueError, TypeError) as exc:
+        _fail(str(exc))
+
+    try:
         fit = surface.fit_relaxed() if relaxed else surface.fit()
-    except SVIError as exc:
+    except (SVIError, ValueError) as exc:
         console.print(f"[red]Error:[/red] {exc}")
         if not relaxed:
             console.print("[dim]Hint: --relaxed will fit anyway, so you can inspect it.[/dim]")

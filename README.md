@@ -192,8 +192,8 @@ python launch_gui.py         # run the GUI
 python examples/basic_usage.py
 ```
 
-Current state: 349 tests pass, 97% branch coverage, with ruff and mypy clean.
-Every source module is above 91%; the GUI is at 100%.
+Current state: 576 tests pass, 97% line coverage, with ruff and mypy clean.
+The GUI, CLI, and the core engine are all at 97–100% coverage.
 
 The coverage gate is enforced by CI, not by pytest `addopts`. A gate in
 `addopts` also applies to partial runs, so `pytest tests/test_gui.py` and even
@@ -208,13 +208,20 @@ Honest inventory of what is still not done:
   Trusted-Publishing workflow is committed, but the package is not published, so
   `pip install black_scholes_model` will not resolve until the PyPI project is
   created and linked to the workflow.
-- **Calendar arbitrage is only checked pairwise.** `SVICurve` offers
-  `calendar_arbitrage_free` for two slices, but there is no term-structure
-  object that validates a whole surface at once.
+- **Calendar arbitrage is a numerical check over a stated range.**
+  `SVICurve.calendar_arbitrage_free` locates the extrema of the difference
+  between two slices rather than sampling it, so it does not depend on grid
+  spacing, and it reports a crossing that the grid would otherwise step over.
+  It is still not a proof: it says nothing outside `[k_low, k_high]`, and the
+  range is part of the contract. There is no closed form for it in the raw
+  parameterisation.
 - **Butterfly arbitrage is a grid check, not a proof.** No closed form exists for
   raw SVI, and SSVI's closed-form conditions come from a stricter
   parameterisation that cannot fit every quoted smile. A finer grid can find
   more violations, never fewer.
+- **No multi-expiry term-structure object.** `calendar_arbitrage_free` checks a
+  pair of slices. Assembling and validating a whole surface of maturities is
+  left to the caller.
 - **No SABR or eSSVI.** SVI only.
 - **Single-expiry fitting only.** Multi-expiry surfaces are assembled by the
   caller, one slice per expiry.

@@ -78,8 +78,14 @@ def check_parameters(a: float, b: float, rho: float, m: float, sigma: float) -> 
     ``False``. The optimiser does produce invalid parameters, and this is what
     tests them.
 
-    The conditions are ``b >= 0``, ``|rho| < 1``, ``sigma > 0``, and a
-    non-negative minimum total variance.
+    The conditions are that every parameter is finite, ``b >= 0``,
+    ``|rho| < 1``, ``sigma > 0``, and a non-negative minimum total variance.
+
+    Finiteness is checked explicitly. Left to the conditions below it would be
+    accidental: ``NaN`` fails every comparison and so reaches the minimum
+    variance, where ``NaN >= 0`` is false and it happens to be rejected, while
+    an infinite ``a`` or ``sigma`` can propagate to an infinite minimum that
+    compares ``>= 0`` as true and would be accepted.
 
     >>> check_parameters(0.04, 0.10, -0.30, 0.0, 0.15)
     True
@@ -93,7 +99,15 @@ def check_parameters(a: float, b: float, rho: float, m: float, sigma: float) -> 
     False
     >>> check_parameters(0.04, 0.10, 0.99, 0.0, 0.15)
     True
+    >>> check_parameters(float("nan"), 0.10, -0.30, 0.0, 0.15)
+    False
+    >>> check_parameters(float("inf"), 0.10, -0.30, 0.0, 0.15)
+    False
+    >>> check_parameters(0.04, 0.10, -0.30, 0.0, float("inf"))
+    False
     """
+    if not all(math.isfinite(x) for x in (a, b, rho, m, sigma)):
+        return False
     if b < 0:
         return False
     if not -1.0 < rho < 1.0:
@@ -144,7 +158,8 @@ class SVICurve:
             raise SVIError(
                 f"invalid SVI parameters (a={self.a}, b={self.b}, "
                 f"rho={self.rho}, m={self.m}, sigma={self.sigma}): "
-                "need b >= 0, |rho| < 1, sigma > 0, and a + b*sigma*sqrt(1-rho^2) >= 0"
+                "need b >= 0, |rho| < 1, sigma > 0, all parameters finite, "
+                "and a + b*sigma*sqrt(1-rho^2) >= 0"
             )
 
     def parameters_are_valid(self) -> bool:
@@ -161,13 +176,6 @@ class SVICurve:
         black_scholes.surface.SVIError: invalid SVI parameters ...
         """
         return check_parameters(self.a, self.b, self.rho, self.m, self.sigma)
-        if self.b < 0:
-            return False
-        if not -1.0 < self.rho < 1.0:
-            return False
-        if self.sigma <= 0:
-            return False
-        return self.minimum_total_variance() >= 0.0
 
     def minimum_total_variance(self) -> float:
         """Closed-form minimum of ``w(k)`` over all real ``k``.
@@ -246,6 +254,13 @@ class SVICurve:
         root = math.sqrt(shifted * shifted + self.sigma * self.sigma)
         return self.b * (self.rho + shifted / root)
 
+    def _d1_vector(self, k: np.ndarray) -> np.ndarray:
+        """Vectorised :meth:`_d1`, used to locate the extrema of a difference."""
+        k_arr = np.asarray(k, dtype=float)
+        shifted = k_arr - self.m
+        root = np.sqrt(shifted * shifted + self.sigma * self.sigma)
+        return self.b * (self.rho + shifted / root)
+
     def _d2(self, k: float) -> float:
         """Second derivative of total variance with respect to ``k``."""
         shifted = k - self.m
@@ -322,16 +337,30 @@ class SVICurve:
         derivation needs and to the spurious roots those steps introduce.
 
         Equality of the two curves is permitted, so only a genuine sign change
-        counts as an intersection.
+        counts as an intersection. A tangential touch that does not change sign
+        is therefore not reported.
+
+        The search is numerical over ``[k_low, k_high]`` and is not a proof of
+        anything outside that range. Inside it the result does not depend on
+        ``points``: the grid is scanned for a sign change, and when it finds
+        none, the stationary points of the difference are located from its
+        analytic derivative and checked directly. That closes the gap a fixed
+        grid leaves, where a narrow dip through zero or a crossing between two
+        adjacent grid points would otherwise be missed. The extrema of a smooth
+        function on a closed interval lie at its endpoints or at its stationary
+        points, so checking those settles the question rather than sampling it.
 
         Args:
             other: The other slice, on the same underlying.
-            k_low: Lower edge of the search range.
-            k_high: Upper edge of the search range.
-            points: Grid resolution.
+            k_low: Lower edge of the search range. A crossing outside it is not
+                detected.
+            k_high: Upper edge of the search range. A crossing outside it is not
+                detected.
+            points: Grid resolution for the initial scan.
 
         Raises:
-            ValueError: If ``points`` is fewer than three.
+            ValueError: If ``points`` is fewer than three, or if the search range
+                is inverted.
 
         >>> short = SVICurve(0.04, 0.10, -0.30, 0.0, 0.15)
         >>> long = SVICurve(0.09, 0.10, -0.30, 0.0, 0.15)
@@ -360,14 +389,69 @@ class SVICurve:
 
         >>> SVICurve(0.09, 0.10, -0.30, 0.0, 0.15).calendar_arbitrage_free(short)
         True
+
+        A crossing just inside the boundary is still found, however coarse the
+        initial grid:
+
+        >>> edge = SVICurve(0.04, 0.10, -0.30, 3.98, 0.15)
+        >>> short.calendar_arbitrage_free(edge, k_low=-4.0, k_high=4.0, points=3)
+        False
+
+        The same pair is clean when the crossing falls outside the searched
+        range, which is the documented limit of a numerical check:
+
+        >>> short.calendar_arbitrage_free(edge, k_low=-2.0, k_high=2.0, points=3)
+        True
         """
         if points < 3:
             raise ValueError(f"points must be at least 3, got {points}")
+        if k_high <= k_low:
+            raise ValueError(f"k_high ({k_high}) must be greater than k_low ({k_low})")
 
         k = np.linspace(k_low, k_high, points)
         difference = self.total_variance_vector(k) - other.total_variance_vector(k)
 
-        return bool(np.all(difference >= 0.0) or np.all(difference <= 0.0))
+        # A sign change between adjacent grid points answers the question: the
+        # curves cross somewhere in that cell, so they are not free.
+        if np.any(difference[:-1] * difference[1:] < 0.0):
+            return False
+
+        # Otherwise look for extrema the grid may have stepped over. The
+        # derivative of the difference is analytic, so each sign change in it
+        # brackets exactly one stationary point, which bisection locates.
+        def slope(x: float) -> float:
+            return float(self._d1_vector(np.array([x]))[0] - other._d1_vector(np.array([x]))[0])
+
+        def value(x: float) -> float:
+            return self.total_variance(x) - other.total_variance(x)
+
+        d_slope = self._d1_vector(k) - other._d1_vector(k)
+        candidates = [float(k[0]), float(k[-1])]
+
+        for index in range(k.size - 1):
+            left, right = float(d_slope[index]), float(d_slope[index + 1])
+            if left == 0.0:
+                candidates.append(float(k[index]))
+            elif left * right < 0.0:
+                low, high = float(k[index]), float(k[index + 1])
+                for _ in range(60):
+                    mid = 0.5 * (low + high)
+                    if slope(low) * slope(mid) <= 0.0:
+                        high = mid
+                    else:
+                        low = mid
+                candidates.append(0.5 * (low + high))
+
+        extrema = [value(x) for x in candidates]
+        lowest, highest = min(extrema), max(extrema)
+
+        # The curves are free unless the difference takes both signs. A tangent
+        # that touches zero and turns back is permitted by the equality rule
+        # above, and an exact touch is only ever zero up to rounding, so the
+        # comparison carries a tolerance scaled to the size of the difference.
+        scale = max(abs(lowest), abs(highest))
+        tolerance = 1e-12 * scale if scale > 0.0 else 0.0
+        return not (lowest < -tolerance and highest > tolerance)
 
     def butterfly_arbitrage_free(
         self, k_low: float = -2.0, k_high: float = 2.0, points: int = 401
@@ -566,10 +650,18 @@ def fit_svi(
         raise SVIError(f"strikes and vols differ in length: {k_arr.size} vs {v_arr.size}")
     if k_arr.size < 4:
         raise SVIError(f"need at least 4 strikes to fit an SVI slice, got {k_arr.size}")
+    if not math.isfinite(forward):
+        raise SVIError(f"forward must be a finite number, got {forward}")
     if forward <= 0:
         raise SVIError(f"forward must be positive, got {forward}")
+    if not math.isfinite(maturity):
+        raise SVIError(f"maturity must be a finite number, got {maturity}")
     if maturity <= 0:
         raise SVIError(f"maturity must be positive, got {maturity}")
+    if not np.all(np.isfinite(k_arr)):
+        raise SVIError("strikes must all be finite numbers")
+    if not np.all(np.isfinite(v_arr)):
+        raise SVIError("implied volatilities must all be finite numbers")
     if np.any(k_arr <= 0):
         raise SVIError("strikes must be positive")
     if np.any(v_arr <= 0):
@@ -666,6 +758,70 @@ def fit_svi(
     )
 
 
+def _validate_surface_quotes(strikes: Sequence[float], implied_vols: Sequence[float]) -> None:
+    """Validate the quoted strikes and volatilities of a smile.
+
+    Shared by :meth:`VolSurface.__post_init__`, which every construction path
+    goes through, and by :meth:`VolSurface.from_market_prices`, which calls it
+    up front so a malformed quote is rejected before any price inversion runs.
+
+    The four-strike minimum that SVI fitting needs is deliberately *not* checked
+    here. That is a property of the fitter, not of a smile: a single quote is a
+    perfectly valid surface to interpolate.
+
+    Raises:
+        SVIError: If the collections are empty, differ in length, contain
+            duplicate or non-positive strikes, or contain non-finite or
+            non-positive volatilities.
+    """
+    strike_list = [float(k) for k in strikes]
+    vol_list = [float(v) for v in implied_vols]
+
+    if not strike_list:
+        raise SVIError(f"VolSurface needs at least one quoted strike, got {len(strike_list)}")
+    if len(strike_list) != len(vol_list):
+        raise SVIError(
+            f"strikes and implied_vols differ in length: {len(strike_list)} vs {len(vol_list)}"
+        )
+
+    _validate_strike_list(strike_list)
+    _validate_vol_list(vol_list)
+
+
+def _validate_strike_list(strikes: Sequence[float]) -> None:
+    """Validate quoted strikes: at least one, positive, finite, and distinct.
+
+    Raises:
+        SVIError: If any of those conditions is violated.
+    """
+    strike_list = [float(k) for k in strikes]
+    if not strike_list:
+        raise SVIError("VolSurface needs at least one quoted strike, got 0")
+
+    seen: set[float] = set()
+    for strike in strike_list:
+        if not math.isfinite(strike):
+            raise SVIError(f"strikes must be finite numbers, got {strike}")
+        if strike <= 0:
+            raise SVIError(f"strikes must be positive, got {strike}")
+        if strike in seen:
+            raise SVIError(f"duplicate strikes make interpolation ambiguous: {strike}")
+        seen.add(strike)
+
+
+def _validate_vol_list(vols: Sequence[float]) -> None:
+    """Validate quoted implied volatilities: positive and finite.
+
+    Raises:
+        SVIError: If any of those conditions is violated.
+    """
+    for vol in (float(v) for v in vols):
+        if not math.isfinite(vol):
+            raise SVIError(f"implied volatilities must be finite numbers, got {vol}")
+        if vol <= 0:
+            raise SVIError(f"implied volatilities must be positive, got {vol}")
+
+
 @dataclass(frozen=True, slots=True)
 class VolSurface:
     """An implied-volatility smile built from market option prices.
@@ -686,6 +842,26 @@ class VolSurface:
     0.23451999
     >>> surface.fit().max_error < 1e-8
     True
+
+    Direct construction is validated too, so an empty or malformed surface fails
+    at construction instead of raising ``IndexError`` later during
+    interpolation. A single quote is a valid surface: interpolation needs only
+    one point, and the four-strike minimum belongs to SVI fitting, not here.
+
+    >>> VolSurface(100.0, (100.0,), (0.2,), 1.0, 0.05, 0.0).implied_volatility(100.0)
+    0.2
+    >>> VolSurface(100.0, (), (), 1.0, 0.05, 0.0)
+    Traceback (most recent call last):
+        ...
+    black_scholes.surface.SVIError: VolSurface needs at least one quoted strike, got 0
+    >>> VolSurface(100.0, (90.0, 100.0), (0.2,), 1.0, 0.05, 0.0)
+    Traceback (most recent call last):
+        ...
+    black_scholes.surface.SVIError: strikes and implied_vols differ in length: 2 vs 1
+    >>> VolSurface(100.0, (100.0, 100.0), (0.2, 0.3), 1.0, 0.05, 0.0)
+    Traceback (most recent call last):
+        ...
+    black_scholes.surface.SVIError: duplicate strikes make interpolation ambiguous: 100.0
     """
 
     spot: float
@@ -695,6 +871,24 @@ class VolSurface:
     risk_free_rate: float
     dividend_yield: float
     option_type: OptionType = OptionType.CALL
+
+    def __post_init__(self) -> None:
+        _validate_surface_quotes(self.strikes, self.implied_vols)
+        checks = (
+            ("spot", self.spot, True),
+            ("time_to_maturity", self.time_to_maturity, True),
+            ("risk_free_rate", self.risk_free_rate, False),
+            ("dividend_yield", self.dividend_yield, False),
+        )
+        for name, value, strictly_positive in checks:
+            if not math.isfinite(value):
+                raise SVIError(f"{name} must be a finite number, got {value}")
+            if strictly_positive and value <= 0:
+                raise SVIError(f"{name} must be positive, got {value}")
+            if not strictly_positive and value < 0:
+                raise SVIError(f"{name} must be non-negative, got {value}")
+        if not isinstance(self.option_type, OptionType):
+            raise SVIError(f"option_type must be OptionType, got {type(self.option_type).__name__}")
 
     @property
     def forward(self) -> float:
@@ -743,6 +937,22 @@ class VolSurface:
         Traceback (most recent call last):
             ...
         black_scholes.surface.SVIError: strikes and prices differ in length: 2 vs 1
+
+        Strike and price validity is checked up front too, so a bad quote is
+        named rather than surfacing later from inside the inversion:
+
+        >>> VolSurface.from_market_prices(100.0, [90.0, 90.0], [18.08, 19.0], 1.0, 0.05)
+        Traceback (most recent call last):
+            ...
+        black_scholes.surface.SVIError: duplicate strikes make interpolation ambiguous: 90.0
+        >>> VolSurface.from_market_prices(100.0, [90.0], [float("nan")], 1.0, 0.05)
+        Traceback (most recent call last):
+            ...
+        black_scholes.surface.SVIError: market prices must be finite numbers, got nan
+        >>> VolSurface.from_market_prices(100.0, [float("inf")], [18.08], 1.0, 0.05)
+        Traceback (most recent call last):
+            ...
+        black_scholes.surface.SVIError: strikes must be finite numbers, got inf
         """
         strike_list = [float(k) for k in strikes]
         price_list = [float(p) for p in prices]
@@ -750,6 +960,13 @@ class VolSurface:
             raise SVIError(
                 f"strikes and prices differ in length: {len(strike_list)} vs {len(price_list)}"
             )
+
+        # Validate the quotes before inverting anything, so a malformed strike
+        # is reported directly instead of as a confusing inversion failure.
+        _validate_strike_list(strike_list)
+        for price in price_list:
+            if not math.isfinite(price):
+                raise SVIError(f"market prices must be finite numbers, got {price}")
 
         vols: list[float] = []
         for strike, price in zip(strike_list, price_list, strict=True):

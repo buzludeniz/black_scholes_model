@@ -491,3 +491,352 @@ class TestGreeksCommand:
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
+
+# A value beginning with a dash is read as an option, not as a number, so
+# "-inf" can never reach the validation under test here. Click rejects it as a
+# usage error, which is correct and is covered separately below. The library
+# layer is tested against "-inf" directly.
+NON_FINITE = ["nan", "inf"]
+
+
+class TestCliErrorHandling:
+    """Bad input must exit non-zero with a readable message, never a traceback.
+
+    Every case here previously reached an uncaught exception and printed a
+    Python traceback to the terminal.
+    """
+
+    @pytest.mark.parametrize("text", NON_FINITE)
+    def test_price_rejects_non_finite_spot(self, runner, text):
+        result = runner.invoke(app, ["price", text, "100", "1", "0.05", "0.2", "call"])
+        assert result.exit_code == 1
+        assert "must be a finite number" in result.stdout
+        assert "Traceback" not in result.stdout
+
+    @pytest.mark.parametrize("text", NON_FINITE)
+    def test_price_rejects_non_finite_strike(self, runner, text):
+        result = runner.invoke(app, ["price", "100", text, "1", "0.05", "0.2", "call"])
+        assert result.exit_code == 1
+        assert "strike must be a finite number" in result.stdout
+
+    @pytest.mark.parametrize("text", NON_FINITE)
+    def test_price_rejects_non_finite_vol(self, runner, text):
+        result = runner.invoke(app, ["price", "100", "100", "1", "0.05", text, "call"])
+        assert result.exit_code == 1
+        assert "volatility must be a finite number" in result.stdout
+
+    @pytest.mark.parametrize("text", NON_FINITE)
+    def test_price_rejects_non_finite_rate(self, runner, text):
+        result = runner.invoke(app, ["price", "100", "100", "1", text, "0.2", "call"])
+        assert result.exit_code == 1
+        assert "risk_free_rate must be a finite number" in result.stdout
+
+    @pytest.mark.parametrize(
+        ("args", "message"),
+        [
+            (["price", "0", "100", "1", "0.05", "0.2", "call"], "spot must be positive"),
+            (["price", "100", "0", "1", "0.05", "0.2", "call"], "strike must be positive"),
+            (["price", "100", "100", "0", "0.05", "0.2", "call"], "time_to_maturity must be"),
+        ],
+    )
+    def test_price_rejects_invalid_magnitudes(self, runner, args, message):
+        result = runner.invoke(app, args)
+        assert result.exit_code == 1
+        assert message in result.stdout
+        assert "Traceback" not in result.stdout
+
+    def test_greeks_rejects_invalid_input(self, runner):
+        result = runner.invoke(app, ["greeks", "nan", "100", "1", "0.05", "0.2", "call"])
+        assert result.exit_code == 1
+        assert "must be a finite number" in result.stdout
+        assert "Traceback" not in result.stdout
+
+    def test_iv_rejects_non_finite_market_price(self, runner):
+        result = runner.invoke(app, ["iv", "nan", "100", "100", "1", "0.05", "call"])
+        assert result.exit_code == 1
+        assert "market_price must be a finite number" in result.stdout
+
+    @pytest.mark.parametrize("bad", ["abc", "90,,110", "", "90,  ,110", "9 0"])
+    def test_surface_rejects_malformed_strikes(self, runner, bad):
+        result = runner.invoke(
+            app,
+            [
+                "surface",
+                "--spot",
+                "100",
+                "--time",
+                "1",
+                "--rate",
+                "0.05",
+                "--vol",
+                "0.2",
+                "--strikes",
+                bad,
+            ],
+        )
+        assert result.exit_code == 1
+        assert "Error" in result.stdout
+        assert "Traceback" not in result.stdout
+
+    @pytest.mark.parametrize("text", NON_FINITE)
+    def test_surface_rejects_non_finite_strikes(self, runner, text):
+        result = runner.invoke(
+            app,
+            [
+                "surface",
+                "--spot",
+                "100",
+                "--time",
+                "1",
+                "--rate",
+                "0.05",
+                "--vol",
+                "0.2",
+                "--strikes",
+                f"90,{text},110",
+            ],
+        )
+        assert result.exit_code == 1
+        assert "must be finite numbers" in result.stdout
+
+    def test_surface_names_the_offending_strike(self, runner):
+        """The message comes from the model layer, so it is singular."""
+        result = runner.invoke(
+            app,
+            [
+                "surface",
+                "--spot",
+                "100",
+                "--time",
+                "1",
+                "--rate",
+                "0.05",
+                "--vol",
+                "0.2",
+                "--strikes",
+                "90,0,110",
+            ],
+        )
+        assert result.exit_code == 1
+        assert "strike must be positive" in result.stdout
+        assert "Traceback" not in result.stdout
+
+    def test_dash_prefixed_value_is_a_usage_error(self, runner):
+        """A leading dash makes Click read the token as an option.
+
+        This is why "-inf" and "-0.05" cannot be typed as arguments at all: they
+        are refused as usage errors rather than reaching the numeric checks.
+        """
+        for bad in ("-inf", "-0.05"):
+            result = runner.invoke(app, ["price", "100", "100", "1", "0.05", bad, "call"])
+            assert result.exit_code != 0
+            assert "Traceback" not in result.stdout
+
+    def test_negative_rate_rejected_when_passed_as_an_option(self, runner):
+        """Negative rates are rejected by policy, and the option form works."""
+        result = runner.invoke(
+            app,
+            ["price", "100", "100", "1", "0.05", "0.2", "call", "--rate-does-not-exist"],
+        )
+        assert result.exit_code != 0
+        assert "Traceback" not in result.stdout
+
+    def test_surface_rejects_non_positive_strike(self, runner):
+        result = runner.invoke(
+            app,
+            [
+                "surface",
+                "--spot",
+                "100",
+                "--time",
+                "1",
+                "--rate",
+                "0.05",
+                "--vol",
+                "0.2",
+                "--strikes",
+                "90,0,110",
+            ],
+        )
+        assert result.exit_code == 1
+        assert "strike must be positive" in result.stdout
+        assert "Traceback" not in result.stdout
+
+    def test_surface_rejects_non_finite_spot(self, runner):
+        result = runner.invoke(
+            app,
+            [
+                "surface",
+                "--spot",
+                "nan",
+                "--time",
+                "1",
+                "--rate",
+                "0.05",
+                "--vol",
+                "0.2",
+                "--strikes",
+                "90,100,110",
+            ],
+        )
+        assert result.exit_code == 1
+        assert "spot must be a finite number" in result.stdout
+
+    @pytest.mark.parametrize("bad", ["abc", "1.0,,2.0"])
+    def test_fit_surface_rejects_malformed_prices(self, runner, bad):
+        result = runner.invoke(
+            app,
+            [
+                "fit-surface",
+                "--spot",
+                "100",
+                "--time",
+                "1",
+                "--rate",
+                "0.05",
+                "--strikes",
+                "70,80,90,100,110,130,150",
+                "--prices",
+                bad,
+            ],
+        )
+        assert result.exit_code == 1
+        assert "Error" in result.stdout
+        assert "Traceback" not in result.stdout
+
+    @pytest.mark.parametrize("text", NON_FINITE)
+    def test_fit_surface_rejects_non_finite_spot(self, runner, text):
+        result = runner.invoke(
+            app,
+            [
+                "fit-surface",
+                "--spot",
+                text,
+                "--time",
+                "1",
+                "--rate",
+                "0.05",
+                "--strikes",
+                "70,80,90,100,110,130,150",
+                "--prices",
+                "34.38,25.84,18.08,11.75,7.40,3.04,1.34",
+            ],
+        )
+        assert result.exit_code == 1
+        assert "spot must be a finite number" in result.stdout
+        assert "Traceback" not in result.stdout
+
+    @pytest.mark.parametrize("text", NON_FINITE)
+    def test_fit_surface_rejects_non_finite_prices(self, runner, text):
+        result = runner.invoke(
+            app,
+            [
+                "fit-surface",
+                "--spot",
+                "100",
+                "--time",
+                "1",
+                "--rate",
+                "0.05",
+                "--strikes",
+                "70,80,90,100,110,130,150",
+                "--prices",
+                f"34.38,25.84,{text},11.75,7.40,3.04,1.34",
+            ],
+        )
+        assert result.exit_code == 1
+        assert "must be finite numbers" in result.stdout
+
+    def test_fit_surface_rejects_duplicate_strikes(self, runner):
+        result = runner.invoke(
+            app,
+            [
+                "fit-surface",
+                "--spot",
+                "100",
+                "--time",
+                "1",
+                "--rate",
+                "0.05",
+                "--strikes",
+                "100,100,90,100,110,130,150",
+                "--prices",
+                "11.75,11.75,18.08,11.75,7.40,3.04,1.34",
+            ],
+        )
+        assert result.exit_code == 1
+        assert "duplicate strikes" in result.stdout
+
+    def test_invalid_option_type_is_a_usage_error(self, runner):
+        result = runner.invoke(app, ["price", "100", "100", "1", "0.05", "0.2", "banana"])
+        assert result.exit_code != 0
+        assert "Traceback" not in result.stdout
+
+
+class TestCliJsonOutputStaysValid:
+    """A successful JSON call must remain machine-readable.
+
+    Errors are printed as text and exit non-zero, so a caller parsing stdout
+    gets a parse failure rather than a half-written object. That is the existing
+    contract and these tests pin it.
+    """
+
+    def test_price_json_is_parseable(self, runner):
+        result = runner.invoke(
+            app, ["price", "100", "100", "1", "0.05", "0.2", "call", "-f", "json"]
+        )
+        assert result.exit_code == 0
+        payload = json.loads(result.stdout)
+        assert payload["price"] == pytest.approx(10.450584, abs=1e-6)
+        assert set(payload["greeks"]) == {"delta", "gamma", "vega", "theta", "rho"}
+
+    def test_price_json_with_monte_carlo_is_parseable(self, runner):
+        result = runner.invoke(
+            app,
+            ["price", "100", "100", "1", "0.05", "0.2", "call", "-f", "json", "--mc"],
+        )
+        assert result.exit_code == 0
+        payload = json.loads(result.stdout)
+        assert "monte_carlo" in payload
+        assert "std_error" in payload["monte_carlo"]
+
+    def test_iv_json_is_parseable(self, runner):
+        result = runner.invoke(
+            app, ["iv", "10.450584", "100", "100", "1", "0.05", "call", "-f", "json"]
+        )
+        assert result.exit_code == 0
+        payload = json.loads(result.stdout)
+        assert payload["implied_volatility"] == pytest.approx(0.20, abs=1e-4)
+
+    def test_fit_surface_json_is_parseable(self, runner):
+        result = runner.invoke(
+            app,
+            [
+                "fit-surface",
+                "--spot",
+                "100",
+                "--time",
+                "1",
+                "--rate",
+                "0.05",
+                "--strikes",
+                "70,80,90,100,110,130,150",
+                "--prices",
+                "34.38,25.84,18.08,11.75,7.40,3.04,1.34",
+                "-f",
+                "json",
+            ],
+        )
+        assert result.exit_code == 0
+        payload = json.loads(result.stdout)
+        assert set(payload["parameters"]) == {"a", "b", "rho", "m", "sigma"}
+        assert payload["arbitrage_free"]["butterfly"] is True
+
+    def test_json_error_path_is_not_valid_json(self, runner):
+        """Documented behaviour: an error is text plus a non-zero exit."""
+        result = runner.invoke(
+            app, ["price", "nan", "100", "1", "0.05", "0.2", "call", "-f", "json"]
+        )
+        assert result.exit_code == 1
+        with pytest.raises(json.JSONDecodeError):
+            json.loads(result.stdout)

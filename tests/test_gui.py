@@ -193,6 +193,62 @@ class TestGetParams:
         assert params.volatility == 0.35
         assert params.dividend_yield == 0.01
 
+    @pytest.mark.parametrize("text", ["nan", "NaN", "inf", "-inf", "Infinity"])
+    @pytest.mark.parametrize("field", ["spot", "strike", "time", "rate", "vol", "div_yield"])
+    def test_non_finite_input_returns_none(self, app, field, text):
+        """`float("nan")` parses, so only a finiteness check can reject it.
+
+        The GUI's own positivity test compares against zero, and every
+        comparison with NaN is false, so NaN would otherwise reach the pricing
+        formulas and put `nan` on screen.
+        """
+        _set_field(app, field, text)
+        assert app._get_params() is None
+
+    @pytest.mark.parametrize("text", ["nan", "inf"])
+    def test_non_finite_input_shows_a_readable_error(self, app, text):
+        """NaN and +inf reach the model layer and are named as non-finite.
+
+        Negative infinity stops earlier, at the GUI's own positivity check,
+        because it is negative as well as infinite.
+        """
+        _set_field(app, "spot", text)
+        app._get_params()
+        assert app.shown[-1][0] == "error"
+        assert "Invalid Input" in app.shown[-1][1][0]
+        assert "finite" in app.shown[-1][1][1]
+
+    def test_negative_infinity_is_caught_by_the_positivity_check(self, app):
+        _set_field(app, "spot", "-inf")
+        app._get_params()
+        assert app.shown[-1][0] == "error"
+        assert "must be positive" in app.shown[-1][1][1]
+
+    def test_non_finite_input_does_not_corrupt_the_display(self, app):
+        """A rejected calculation must leave the previous result untouched."""
+        app._on_price()
+        good_price = app.price_var.get()
+        good_delta = app.greek_vars["delta"].get()
+        assert good_price != BLANK
+
+        app.shown.clear()
+        for field in ("spot", "vol", "rate"):
+            _set_field(app, field, "nan")
+            app._on_price()
+
+        assert app.price_var.get() == good_price
+        assert app.greek_vars["delta"].get() == good_delta
+        assert "nan" not in app.price_var.get()
+        assert all(kind == "error" for kind, _ in app.shown)
+
+    def test_non_finite_market_price_does_not_corrupt_the_display(self, app, monkeypatch):
+        """The IV dialog parses a price too, so it needs the same treatment."""
+        _stub_market_price_dialog(monkeypatch, app, float("nan"))
+        app._on_iv()
+        assert app.shown, "a non-finite market price must be reported"
+        assert app.shown[-1][0] == "error"
+        assert app.entries["vol"].get() == "0.20", "vol field must be untouched"
+
 
 # --- Price Calculation ---
 

@@ -56,7 +56,10 @@ class OptionParams:
         dividend_yield: Continuous dividend yield (q).
 
     Raises:
-        ValueError: If any input violates a positivity constraint.
+        ValueError: If any input is not finite, or violates a positivity
+            constraint. ``NaN`` and ``+/-inf`` are rejected for every numeric
+            field, because comparisons such as ``value <= 0`` are false for
+            ``NaN`` and would otherwise let it reach the pricing formulas.
 
     >>> p = OptionParams(100.0, 100.0, 1.0, 0.05, 0.20)
     >>> p.spot, p.strike, p.volatility
@@ -73,6 +76,40 @@ class OptionParams:
     Traceback (most recent call last):
         ...
     ValueError: volatility must be positive, got 0.0
+
+    ``NaN`` and infinities are rejected for every numeric field:
+
+    >>> OptionParams(float("nan"), 100.0, 1.0, 0.05, 0.20)
+    Traceback (most recent call last):
+        ...
+    ValueError: spot must be a finite number, got nan
+    >>> OptionParams(100.0, float("inf"), 1.0, 0.05, 0.20)
+    Traceback (most recent call last):
+        ...
+    ValueError: strike must be a finite number, got inf
+    >>> OptionParams(100.0, 100.0, float("-inf"), 0.05, 0.20)
+    Traceback (most recent call last):
+        ...
+    ValueError: time_to_maturity must be a finite number, got -inf
+    >>> OptionParams(100.0, 100.0, 1.0, 0.05, float("nan"))
+    Traceback (most recent call last):
+        ...
+    ValueError: volatility must be a finite number, got nan
+    >>> OptionParams(100.0, 100.0, 1.0, float("nan"), 0.20)
+    Traceback (most recent call last):
+        ...
+    ValueError: risk_free_rate must be a finite number, got nan
+    >>> OptionParams(100.0, 100.0, 1.0, 0.05, 0.20, OptionType.CALL, float("nan"))
+    Traceback (most recent call last):
+        ...
+    ValueError: dividend_yield must be a finite number, got nan
+
+    Negative rates and dividend yields stay rejected, as before:
+
+    >>> OptionParams(100.0, 100.0, 1.0, -0.01, 0.20)
+    Traceback (most recent call last):
+        ...
+    ValueError: risk_free_rate must be non-negative, got -0.01
     """
 
     spot: float
@@ -93,6 +130,8 @@ class OptionParams:
             ("dividend_yield", self.dividend_yield, False),
         )
         for name, value, strictly_positive in checks:
+            if not math.isfinite(value):
+                raise ValueError(f"{name} must be a finite number, got {value}")
             if strictly_positive and value <= 0:
                 raise ValueError(f"{name} must be positive, got {value}")
             if not strictly_positive and value < 0:
@@ -399,7 +438,37 @@ def implied_volatility(
         Annualized implied volatility as a native ``float``.
 
     Raises:
-        ValueError: If ``market_price`` lies outside the no-arbitrage bounds.
+        ValueError: If ``market_price`` is not finite, if a solver option is
+            out of range (``tol`` and the bracket edges must be positive and
+            ``vol_upper`` must exceed ``vol_lower``), if ``max_iter`` is not
+            positive, or if ``market_price`` lies outside the no-arbitrage
+            bounds.
+
+    Solver options are validated before any pricing runs, so a misconfigured
+    call fails immediately rather than returning a plausible wrong number:
+
+    >>> call = OptionParams(100.0, 100.0, 1.0, 0.05, 0.20, OptionType.CALL)
+    >>> price = black_scholes_price(call)
+    >>> implied_volatility(price, call, tol=0.0)
+    Traceback (most recent call last):
+        ...
+    ValueError: tol must be positive, got 0.0
+    >>> implied_volatility(price, call, max_iter=0)
+    Traceback (most recent call last):
+        ...
+    ValueError: max_iter must be positive, got 0
+    >>> implied_volatility(price, call, vol_lower=0.0)
+    Traceback (most recent call last):
+        ...
+    ValueError: vol_lower must be positive, got 0.0
+    >>> implied_volatility(price, call, vol_upper=0.1, vol_lower=0.2)
+    Traceback (most recent call last):
+        ...
+    ValueError: vol_upper (0.1) must be greater than vol_lower (0.2)
+    >>> implied_volatility(float("nan"), call)
+    Traceback (most recent call last):
+        ...
+    ValueError: market_price must be a finite number, got nan
 
     Round-tripping a known price recovers the input volatility:
 
@@ -443,6 +512,22 @@ def implied_volatility(
         ...
     ValueError: market price 200.000000 outside no-arbitrage bounds [0.000000, 95.122942]
     """
+    # Validate the solver configuration first. A bad bracket or tolerance would
+    # otherwise produce a plausible-looking number instead of an error. Also,
+    # non-finite inputs compare false against every bound, so market_price must
+    # be checked explicitly rather than relying on the no-arbitrage test below,
+    # which a NaN or infinite price would slip straight past.
+    if not math.isfinite(market_price):
+        raise ValueError(f"market_price must be a finite number, got {market_price}")
+    if not math.isfinite(tol) or tol <= 0:
+        raise ValueError(f"tol must be positive, got {tol}")
+    if max_iter <= 0:
+        raise ValueError(f"max_iter must be positive, got {max_iter}")
+    if not math.isfinite(vol_lower) or vol_lower <= 0:
+        raise ValueError(f"vol_lower must be positive, got {vol_lower}")
+    if not math.isfinite(vol_upper) or vol_upper <= vol_lower:
+        raise ValueError(f"vol_upper ({vol_upper}) must be greater than vol_lower ({vol_lower})")
+
     lower, upper = arbitrage_bounds(params)
     tolerance = 1e-8
     if not (lower - tolerance <= market_price <= upper + tolerance):

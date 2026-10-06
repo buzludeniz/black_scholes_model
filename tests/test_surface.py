@@ -409,6 +409,103 @@ class TestCalendarArbitrage:
         fine = short.calendar_arbitrage_free(skewed, points=4001)
         assert not (coarse and not fine)
 
+    def test_inverted_search_range_rejected(self):
+        with pytest.raises(ValueError, match="must be greater than k_low"):
+            TRUTH.calendar_arbitrage_free(TRUTH, k_low=2.0, k_high=-2.0)
+
+    def test_degenerate_search_range_rejected(self):
+        with pytest.raises(ValueError, match="must be greater than k_low"):
+            TRUTH.calendar_arbitrage_free(TRUTH, k_low=1.0, k_high=1.0)
+
+
+class TestCalendarArbitrageResolution:
+    """The answer must not depend on how the grid happens to be spaced.
+
+    A fixed grid can step over a crossing that falls between two of its points,
+    which reports a crossing pair as free. The check therefore locates the
+    stationary points of the difference rather than trusting the samples, so it
+    gives the same answer at every resolution.
+    """
+
+    #: Crosses TRUTH only between the sample points of a 3-point grid.
+    NARROW = SVICurve(0.04, 0.3751, 0.715, 1.654, 0.264)
+
+    def test_narrow_crossing_a_coarse_grid_would_miss(self):
+        """The regression this refinement exists for.
+
+        At three points the difference is negative at every sample, so sampling
+        alone reports the pair as free. It genuinely crosses: the difference runs
+        from about -1.234 to +0.032 across the range.
+        """
+        k = np.linspace(-4.0, 4.0, 3)
+        difference = TRUTH.total_variance_vector(k) - self.NARROW.total_variance_vector(k)
+        assert np.all(difference < 0.0), "precondition: the coarse grid sees one sign"
+        assert bool(np.all(difference >= 0.0) or np.all(difference <= 0.0)), (
+            "sampling alone would wrongly conclude 'free'"
+        )
+
+        assert TRUTH.calendar_arbitrage_free(self.NARROW, points=3) is False
+
+    @pytest.mark.parametrize("points", [3, 5, 9, 51, 201, 1001, 2001])
+    def test_answer_is_independent_of_grid_resolution(self, points):
+        assert TRUTH.calendar_arbitrage_free(self.NARROW, points=points) is False
+
+    def test_narrow_crossing_confirmed_by_dense_scan(self):
+        """Cross-check the refinement against a very dense sampling."""
+        dense = np.linspace(-4.0, 4.0, 200_001)
+        difference = TRUTH.total_variance_vector(dense) - self.NARROW.total_variance_vector(dense)
+        assert difference.min() < 0.0 < difference.max(), "the curves really do cross"
+
+    @pytest.mark.parametrize("points", [3, 51, 2001])
+    def test_crossing_near_the_upper_boundary_is_found(self, points):
+        """A crossing at the very edge of the searched range still counts."""
+        shifted = SVICurve(0.04, 0.10, -0.30, 3.98, 0.15)
+        free = TRUTH.calendar_arbitrage_free(shifted, k_low=-4.0, k_high=4.0, points=points)
+        assert free is False
+
+    @pytest.mark.parametrize("points", [3, 51, 2001])
+    def test_crossing_near_the_lower_boundary_is_found(self, points):
+        shifted = SVICurve(0.04, 0.10, -0.30, -3.98, 0.15)
+        free = TRUTH.calendar_arbitrage_free(shifted, k_low=-4.0, k_high=4.0, points=points)
+        assert free is False
+
+    def test_crossing_outside_the_searched_range_is_not_reported(self):
+        """The documented limit: the given range bounds what is checked."""
+        shifted = SVICurve(0.04, 0.10, -0.30, 3.98, 0.15)
+        assert TRUTH.calendar_arbitrage_free(shifted, k_low=-2.0, k_high=2.0, points=3) is True
+
+    @pytest.mark.parametrize("points", [3, 51, 2001])
+    def test_identical_curves_are_free_at_any_resolution(self, points):
+        assert TRUTH.calendar_arbitrage_free(TRUTH, points=points) is True
+
+    @pytest.mark.parametrize("points", [3, 51, 2001])
+    def test_a_constant_gap_never_crosses(self, points):
+        """Curves differing only in `a` differ by a constant, so never cross."""
+        higher = SVICurve(0.0401, 0.10, -0.30, 0.0, 0.15)
+        assert TRUTH.calendar_arbitrage_free(higher, points=points) is True
+        assert higher.calendar_arbitrage_free(TRUTH, points=points) is True
+
+    @pytest.mark.parametrize("points", [3, 51, 2001])
+    def test_near_tangency_is_permitted(self, points):
+        """Touching zero without changing sign is not a crossing.
+
+        Equality is allowed by the definition, so a difference that grazes zero
+        and turns back stays free. Lifting a shallowly-crossing curve by exactly
+        the depth of its dip produces that, and an exact touch is only ever zero
+        up to rounding, so this also pins the tolerance the check relies on.
+        """
+        crossing = SVICurve(0.04, 0.10, -0.30, 0.05, 0.15)
+        dense = np.linspace(-4.0, 4.0, 20_001)
+        difference = TRUTH.total_variance_vector(dense) - crossing.total_variance_vector(dense)
+        assert difference.min() < 0.0, "precondition: these two do cross"
+
+        depth = abs(float(difference.min()))
+        grazes = SVICurve(0.04 - depth, 0.10, -0.30, 0.05, 0.15)
+
+        grazed = TRUTH.total_variance_vector(dense) - grazes.total_variance_vector(dense)
+        assert grazed.min() >= -1e-12, "precondition: it touches zero without crossing"
+        assert TRUTH.calendar_arbitrage_free(grazes, points=points) is True
+
 
 class TestFitTolerance:
     """The error bound that stops an unfittable shape being called a fit."""
@@ -496,6 +593,36 @@ class TestFitValidation:
         vols = np.array([TRUTH.implied_volatility(math.log(k / 100.0), 1.0) for k in strikes])
         fit = fit_svi(100.0, strikes, vols, 1.0)
         assert fit.rms_error < 1e-8
+
+    @pytest.mark.parametrize("bad", [float("nan"), float("inf"), float("-inf")])
+    def test_non_finite_strikes_rejected_by_fit(self, bad):
+        strikes = np.array([70.0, 80.0, 90.0, 100.0, bad])
+        with pytest.raises(SVIError, match="strikes must all be finite numbers"):
+            fit_svi(100.0, strikes, np.full(5, 0.2), 1.0)
+
+    @pytest.mark.parametrize("bad", [float("nan"), float("inf"), float("-inf")])
+    def test_non_finite_vols_rejected_by_fit(self, bad):
+        vols = np.full(STRIKES.size, 0.2)
+        vols[3] = bad
+        with pytest.raises(SVIError, match="implied volatilities must all be finite numbers"):
+            fit_svi(100.0, STRIKES, vols, 1.0)
+
+    @pytest.mark.parametrize("bad", [float("nan"), float("inf"), float("-inf")])
+    def test_non_finite_forward_rejected(self, bad):
+        with pytest.raises(SVIError, match="forward must be a finite number"):
+            fit_svi(bad, STRIKES, np.full(7, 0.2), 1.0)
+
+    @pytest.mark.parametrize("bad", [float("nan"), float("inf"), float("-inf")])
+    def test_non_finite_maturity_rejected(self, bad):
+        with pytest.raises(SVIError, match="maturity must be a finite number"):
+            fit_svi(100.0, STRIKES, np.full(7, 0.2), bad)
+
+    def test_non_finite_input_never_returns_a_fit(self):
+        """The point of the check: no nan curve is ever produced."""
+        with pytest.raises(SVIError):
+            fit_svi(100.0, STRIKES, np.full(7, float("nan")), 1.0)
+        with pytest.raises(SVIError):
+            fit_svi(100.0, STRIKES, np.full(7, 0.2), float("nan"))
 
 
 class TestVolSurface:
@@ -599,3 +726,170 @@ class TestSurfaceConstants:
     def test_failure_message_is_public(self):
         assert isinstance(SVI_FIT_FAILURE, str)
         assert "arbitrage-free" in SVI_FIT_FAILURE
+
+
+class TestNonFiniteSVIParameters:
+    """Raw SVI parameters must be finite.
+
+    ``NaN`` compares false against every bound, so it slips through a sign check
+    and only fails later, wherever the arithmetic happens to propagate it. An
+    infinite ``a`` or ``sigma`` is worse: it can reach an infinite minimum
+    variance, which satisfies ``>= 0`` and would be accepted as valid.
+    """
+
+    @pytest.mark.parametrize("bad", [float("nan"), float("inf"), float("-inf")])
+    @pytest.mark.parametrize("index", range(5))
+    def test_check_parameters_rejects_non_finite(self, index, bad):
+        values = [0.04, 0.10, -0.30, 0.0, 0.15]
+        values[index] = bad
+        assert check_parameters(*values) is False
+
+    @pytest.mark.parametrize("bad", [float("nan"), float("inf"), float("-inf")])
+    def test_constructor_rejects_non_finite(self, bad):
+        with pytest.raises(SVIError, match="invalid SVI parameters"):
+            SVICurve(a=bad, b=0.10, rho=-0.30, m=0.0, sigma=0.15)
+        with pytest.raises(SVIError, match="invalid SVI parameters"):
+            SVICurve(a=0.04, b=0.10, rho=-0.30, m=0.0, sigma=bad)
+
+    def test_infinite_sigma_is_not_accepted_as_valid(self):
+        """Without a finiteness check this case reports itself as valid."""
+        assert check_parameters(0.04, 0.10, -0.30, 0.0, float("inf")) is False
+
+    def test_valid_parameters_still_accepted(self):
+        assert check_parameters(0.04, 0.10, -0.30, 0.0, 0.15) is True
+
+
+class TestVolSurfaceValidation:
+    """Direct construction is validated, not just the factory."""
+
+    def test_empty_surface_rejected(self):
+        with pytest.raises(SVIError, match="needs at least one quoted strike"):
+            VolSurface(100.0, (), (), 1.0, 0.05, 0.0)
+
+    def test_empty_surface_would_otherwise_raise_index_error(self):
+        """The bug this prevents: interpolation indexing an empty list."""
+        surface = object.__new__(VolSurface)
+        object.__setattr__(surface, "strikes", ())
+        object.__setattr__(surface, "implied_vols", ())
+        object.__setattr__(surface, "spot", 100.0)
+        object.__setattr__(surface, "time_to_maturity", 1.0)
+        object.__setattr__(surface, "risk_free_rate", 0.05)
+        object.__setattr__(surface, "dividend_yield", 0.0)
+        with pytest.raises(IndexError):
+            surface.implied_volatility(100.0)
+
+    def test_mismatched_lengths_rejected(self):
+        with pytest.raises(SVIError, match="differ in length: 2 vs 1"):
+            VolSurface(100.0, (90.0, 100.0), (0.2,), 1.0, 0.05, 0.0)
+
+    def test_duplicate_strikes_rejected(self):
+        """Interpolation would be ambiguous about which quote to return."""
+        with pytest.raises(SVIError, match="duplicate strikes"):
+            VolSurface(100.0, (100.0, 100.0), (0.2, 0.3), 1.0, 0.05, 0.0)
+
+    @pytest.mark.parametrize("strike", [0.0, -100.0, -1.0])
+    def test_non_positive_strikes_rejected(self, strike):
+        with pytest.raises(SVIError, match="strikes must be positive"):
+            VolSurface(100.0, (strike,), (0.2,), 1.0, 0.05, 0.0)
+
+    @pytest.mark.parametrize("bad", [float("nan"), float("inf"), float("-inf")])
+    def test_non_finite_strikes_rejected(self, bad):
+        with pytest.raises(SVIError, match="strikes must be finite numbers"):
+            VolSurface(100.0, (90.0, bad), (0.2, 0.3), 1.0, 0.05, 0.0)
+
+    @pytest.mark.parametrize("vol", [0.0, -0.2, -1.0])
+    def test_non_positive_vols_rejected(self, vol):
+        with pytest.raises(SVIError, match="implied volatilities must be positive"):
+            VolSurface(100.0, (100.0,), (vol,), 1.0, 0.05, 0.0)
+
+    @pytest.mark.parametrize("bad", [float("nan"), float("inf"), float("-inf")])
+    def test_non_finite_vols_rejected(self, bad):
+        with pytest.raises(SVIError, match="implied volatilities must be finite numbers"):
+            VolSurface(100.0, (90.0, 100.0), (0.2, bad), 1.0, 0.05, 0.0)
+
+    @pytest.mark.parametrize("bad", [float("nan"), float("inf"), float("-inf")])
+    def test_non_finite_spot_rejected(self, bad):
+        with pytest.raises(SVIError, match="spot must be a finite number"):
+            VolSurface(bad, (100.0,), (0.2,), 1.0, 0.05, 0.0)
+
+    @pytest.mark.parametrize("bad", [float("nan"), float("inf"), float("-inf")])
+    def test_non_finite_maturity_rejected(self, bad):
+        with pytest.raises(SVIError, match="time_to_maturity must be a finite number"):
+            VolSurface(100.0, (100.0,), (0.2,), bad, 0.05, 0.0)
+
+    @pytest.mark.parametrize("bad", [float("nan"), float("inf"), float("-inf")])
+    def test_non_finite_rates_rejected(self, bad):
+        with pytest.raises(SVIError, match="risk_free_rate must be a finite number"):
+            VolSurface(100.0, (100.0,), (0.2,), 1.0, bad, 0.0)
+        with pytest.raises(SVIError, match="dividend_yield must be a finite number"):
+            VolSurface(100.0, (100.0,), (0.2,), 1.0, 0.05, bad)
+
+    @pytest.mark.parametrize(
+        ("field", "value", "message"),
+        [
+            ("spot", 0.0, "spot must be positive"),
+            ("spot", -1.0, "spot must be positive"),
+            ("time_to_maturity", 0.0, "time_to_maturity must be positive"),
+            ("risk_free_rate", -0.01, "risk_free_rate must be non-negative"),
+            ("dividend_yield", -0.01, "dividend_yield must be non-negative"),
+        ],
+    )
+    def test_invalid_scalars_rejected(self, field, value, message):
+        kwargs = {
+            "spot": 100.0,
+            "strikes": (100.0,),
+            "implied_vols": (0.2,),
+            "time_to_maturity": 1.0,
+            "risk_free_rate": 0.05,
+            "dividend_yield": 0.0,
+        }
+        kwargs[field] = value
+        with pytest.raises(SVIError, match=message):
+            VolSurface(**kwargs)
+
+    def test_single_quote_is_a_valid_surface(self):
+        """Interpolation needs one point; the four-strike minimum is the fitter's."""
+        surface = VolSurface(100.0, (100.0,), (0.2,), 1.0, 0.05, 0.0)
+        assert surface.implied_volatility(100.0) == pytest.approx(0.2)
+        assert surface.implied_volatility(50.0) == pytest.approx(0.2)
+        assert surface.implied_volatility(500.0) == pytest.approx(0.2)
+
+    def test_two_quotes_interpolate(self):
+        """A strike between the quotes gets a strictly intermediate volatility."""
+        surface = VolSurface(100.0, (90.0, 110.0), (0.25, 0.23), 1.0, 0.05, 0.0)
+        assert 0.23 < surface.implied_volatility(100.0) < 0.25
+        assert surface.implied_volatility(90.0) == pytest.approx(0.25)
+        assert surface.implied_volatility(110.0) == pytest.approx(0.23)
+
+    def test_fitting_still_needs_four_strikes(self):
+        """The four-strike minimum stays with the fitter, not the surface."""
+        surface = VolSurface(100.0, (90.0, 100.0, 110.0), (0.25, 0.24, 0.23), 1.0, 0.05, 0.0)
+        with pytest.raises(SVIError, match="at least 4 strikes"):
+            surface.fit()
+
+    def test_unsorted_strikes_are_still_interpolatable(self):
+        """Interpolation happens in log-moneyness, so it must sort first."""
+        surface = VolSurface(100.0, (110.0, 90.0), (0.23, 0.25), 1.0, 0.05, 0.0)
+        forward = 100.0 * math.exp(0.05)
+        k_lo, k_hi = math.log(90.0 / forward), math.log(110.0 / forward)
+        target = math.log(100.0 / forward)
+        weight = (target - k_lo) / (k_hi - k_lo)
+        assert surface.implied_volatility(100.0) == pytest.approx(0.25 + weight * (0.23 - 0.25))
+
+    def test_factory_applies_the_same_rules(self):
+        with pytest.raises(SVIError, match="duplicate strikes"):
+            VolSurface.from_market_prices(100.0, [90.0, 90.0], [18.08, 19.0], 1.0, 0.05)
+
+    @pytest.mark.parametrize("bad", [float("nan"), float("inf")])
+    def test_factory_rejects_non_finite_prices(self, bad):
+        with pytest.raises(SVIError, match="market prices must be finite numbers"):
+            VolSurface.from_market_prices(100.0, [90.0], [bad], 1.0, 0.05)
+
+    @pytest.mark.parametrize("bad", [float("nan"), float("inf")])
+    def test_factory_rejects_non_finite_strikes(self, bad):
+        with pytest.raises(SVIError, match="strikes must be finite numbers"):
+            VolSurface.from_market_prices(100.0, [bad], [18.08], 1.0, 0.05)
+
+    def test_factory_rejects_non_positive_strikes(self):
+        with pytest.raises(SVIError, match="strikes must be positive"):
+            VolSurface.from_market_prices(100.0, [-90.0], [18.08], 1.0, 0.05)

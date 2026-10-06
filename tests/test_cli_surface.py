@@ -141,10 +141,44 @@ class TestFitSurfaceFailures:
         assert result.exit_code != 0
         assert "no-arbitrage bounds" in result.stdout
 
-    def test_rejection_suggests_relaxed(self, runner):
+    def test_fit_rejection_suggests_relaxed(self, runner):
+        """A rejection that --relaxed can actually bypass must say so.
+
+        The hint is reserved for fit failures. A quote that fails inversion is
+        rejected with or without --relaxed, so offering it there would point at
+        a flag that cannot help.
+        """
+        strikes = [80.0, 90.0, 95.0, 100.0, 105.0, 110.0, 130.0]
+        vols = [0.20, 0.22, 0.40, 0.60, 0.40, 0.22, 0.20]
+        prices = [
+            black_scholes_price(OptionParams(SPOT, k, MATURITY, RATE, v, OptionType.CALL))
+            for k, v in zip(strikes, vols, strict=True)
+        ]
+        result = runner.invoke(
+            app,
+            [
+                "fit-surface",
+                "--spot",
+                str(SPOT),
+                "--time",
+                str(MATURITY),
+                "--rate",
+                str(RATE),
+                "--strikes",
+                ",".join(f"{k:g}" for k in strikes),
+                "--prices",
+                ",".join(f"{p:.6f}" for p in prices),
+            ],
+        )
+        assert result.exit_code != 0
+        assert "--relaxed" in result.stdout
+
+    def test_inversion_failure_does_not_suggest_relaxed(self, runner):
+        """A price outside the arbitrage bounds is not fixable by --relaxed."""
         bad = [1.0, 18.0, 18.08, 11.75, 7.4, 3.0, 1.34]
         result = runner.invoke(app, ["fit-surface", *_with_prices(bad)])
-        assert "--relaxed" in result.stdout
+        assert result.exit_code != 0
+        assert "--relaxed" not in result.stdout
 
     def test_unfittable_shape_exits_nonzero(self, runner):
         """Prices that invert fine but whose smile no SVI curve can match.

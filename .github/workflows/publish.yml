@@ -1,12 +1,15 @@
-# Publishing black-scholes to PyPI via Trusted Publishing (OIDC).
+# Publishing black_scholes_model to PyPI via Trusted Publishing (OIDC).
 #
 # One-time setup on pypi.org, done once by the project owner:
 #
 #   1. Register the project. Sign in at https://pypi.org and create a project
-#      with the distribution name that setuptools derives from pyproject.toml.
-#      pyproject.toml sets `name = "black-scholes"`, so the PyPI project name
-#      is `black-scholes` (not `black_scholes_model`). Note the README's
-#      install line currently says `black_scholes_model`; that is a README bug.
+#      whose name matches the distribution name declared in pyproject.toml,
+#      which is `black_scholes_model`. That same underscore spelling is used by
+#      the built wheel filename, the README install line
+#      (`pip install black_scholes_model`), and the GitHub repository name, so
+#      all four agree. The import name is shorter (`black_scholes`); the
+#      distribution name is not. Distribution and import names are separate,
+#      and only the distribution name reaches PyPI.
 #   2. On that project, go to Publishing -> Add a new publisher -> choose
 #      "GitHub".
 #   3. Fill in the publisher details exactly:
@@ -96,6 +99,15 @@ jobs:
           smoke/bin/python -m pip install --upgrade pip
           smoke/bin/python -m pip install dist/*.whl
           smoke/bin/python -c "import black_scholes; print('imported version', black_scholes.__version__)"
+          # The installed metadata is what PyPI indexes, so it must agree with
+          # the in-package __version__ or the uploaded release is mislabelled.
+          smoke/bin/python -c "
+          import importlib.metadata as md
+          import black_scholes
+          dist = md.version('black_scholes_model')
+          assert dist == black_scholes.__version__, (dist, black_scholes.__version__)
+          print('metadata version agrees:', dist)
+          "
           smoke/bin/python -c "import black_scholes; print('spot price', black_scholes.black_scholes_price(black_scholes.OptionParams(100.0, 100.0, 1.0, 0.05, 0.20)))"
 
       - name: Upload artifacts

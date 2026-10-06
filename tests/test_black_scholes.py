@@ -449,6 +449,111 @@ class TestInputValidation:
     def test_forward_price(self):
         assert ATM_CALL.forward_price == pytest.approx(100.0 * math.exp(0.05), abs=1e-10)
 
+    @pytest.mark.parametrize("bad", [float("nan"), float("inf"), float("-inf")])
+    @pytest.mark.parametrize(
+        "field",
+        [
+            "spot",
+            "strike",
+            "time_to_maturity",
+            "volatility",
+            "risk_free_rate",
+            "dividend_yield",
+        ],
+    )
+    def test_non_finite_params_rejected(self, field, bad):
+        """NaN and infinities must never reach the pricing formulas.
+
+        Comparisons like `value <= 0` are false for NaN, so a positivity check
+        alone lets NaN through and pricing then returns nan. Every numeric
+        field is therefore checked for finiteness first.
+        """
+        kwargs = {
+            "spot": 100.0,
+            "strike": 100.0,
+            "time_to_maturity": 1.0,
+            "risk_free_rate": 0.05,
+            "volatility": 0.2,
+            "dividend_yield": 0.0,
+        }
+        kwargs[field] = bad
+        with pytest.raises(ValueError, match=f"{field} must be a finite number"):
+            OptionParams(**kwargs)
+
+    def test_non_finite_input_never_yields_a_price(self):
+        """The point of the check: no nan is ever returned."""
+        for bad in (float("nan"), float("inf"), float("-inf")):
+            with pytest.raises(ValueError):
+                black_scholes_price(OptionParams(bad, 100.0, 1.0, 0.05, 0.2))
+            with pytest.raises(ValueError):
+                black_scholes_greeks(OptionParams(100.0, 100.0, 1.0, 0.05, bad))
+
+    def test_replace_volatility_also_validates(self):
+        """A copy with a bad volatility is rejected, not silently built."""
+        with pytest.raises(ValueError, match="volatility must be a finite number"):
+            ATM_CALL.replace_volatility(float("nan"))
+
+
+class TestImpliedVolatilitySolverOptions:
+    """Solver configuration is validated before any pricing runs.
+
+    A bad tolerance or bracket would otherwise return a plausible-looking number
+    instead of an error, which is the worst possible failure for an inversion.
+    """
+
+    @pytest.mark.parametrize("tol", [0.0, -1e-10, float("nan"), float("inf")])
+    def test_bad_tolerance_rejected(self, tol):
+        price = black_scholes_price(ATM_CALL)
+        with pytest.raises(ValueError, match="tol must be positive"):
+            implied_volatility(price, ATM_CALL, tol=tol)
+
+    @pytest.mark.parametrize("max_iter", [0, -1, -100])
+    def test_bad_iteration_count_rejected(self, max_iter):
+        price = black_scholes_price(ATM_CALL)
+        with pytest.raises(ValueError, match="max_iter must be positive"):
+            implied_volatility(price, ATM_CALL, max_iter=max_iter)
+
+    @pytest.mark.parametrize("lower", [0.0, -0.1, float("nan"), float("-inf")])
+    def test_bad_lower_bracket_rejected(self, lower):
+        price = black_scholes_price(ATM_CALL)
+        with pytest.raises(ValueError, match="vol_lower must be positive"):
+            implied_volatility(price, ATM_CALL, vol_lower=lower)
+
+    def test_inverted_bracket_rejected(self):
+        price = black_scholes_price(ATM_CALL)
+        with pytest.raises(ValueError, match="must be greater than vol_lower"):
+            implied_volatility(price, ATM_CALL, vol_lower=0.5, vol_upper=0.2)
+
+    def test_equal_bracket_edges_rejected(self):
+        """Equal edges leave no range to search, so they are not valid."""
+        price = black_scholes_price(ATM_CALL)
+        with pytest.raises(ValueError, match="must be greater than vol_lower"):
+            implied_volatility(price, ATM_CALL, vol_lower=0.2, vol_upper=0.2)
+
+    @pytest.mark.parametrize("upper", [float("nan"), float("inf")])
+    def test_non_finite_upper_bracket_rejected(self, upper):
+        price = black_scholes_price(ATM_CALL)
+        with pytest.raises(ValueError, match="must be greater than vol_lower"):
+            implied_volatility(price, ATM_CALL, vol_upper=upper)
+
+    @pytest.mark.parametrize("price", [float("nan"), float("inf"), float("-inf")])
+    def test_non_finite_market_price_rejected(self, price):
+        with pytest.raises(ValueError, match="market_price must be a finite number"):
+            implied_volatility(price, ATM_CALL)
+
+    def test_solver_validation_precedes_the_bounds_check(self):
+        """A bad option is reported as a bad option, not as an out-of-bounds price."""
+        with pytest.raises(ValueError, match="market_price must be a finite number"):
+            implied_volatility(float("nan"), ATM_CALL, tol=0.0)
+
+    def test_valid_options_still_work(self):
+        """Validation must not reject a legitimate narrow configuration."""
+        price = black_scholes_price(ATM_CALL)
+        recovered = implied_volatility(
+            price, ATM_CALL, tol=1e-12, max_iter=500, vol_lower=1e-4, vol_upper=2.0
+        )
+        assert recovered == pytest.approx(0.20, abs=1e-6)
+
 
 class TestPricingResult:
     """Result container behaviour."""
