@@ -20,6 +20,7 @@ from black_scholes import (
     monte_carlo_price,
     price_option,
 )
+from black_scholes.surface import SVIError, VolSurface
 
 app = typer.Typer(
     name="bs",
@@ -284,6 +285,113 @@ def greeks(
             f"  Positive for calls, negative for puts.",
             title=f"Greeks: {opt.value.capitalize()} K={strike} T={time} vol={vol:.1%}",
             border_style="blue",
+        )
+    )
+
+
+@app.command(name="fit-surface")
+def fit_surface(
+    spot: Annotated[float, typer.Option("--spot", "-S", help="Current underlying price")],
+    strikes: Annotated[
+        str, typer.Option("--strikes", "-K", help="Comma-separated strikes, at least 4")
+    ],
+    prices: Annotated[str, typer.Option("--prices", "-p", help="Comma-separated market prices")],
+    time: Annotated[float, typer.Option("--time", "-T", help="Time to maturity in years")],
+    rate: Annotated[float, typer.Option("--rate", "-r", help="Risk-free rate")],
+    option_type: Annotated[
+        str, typer.Option("--type", "-t", help="call or put", parser=_parse_option_type)
+    ] = "call",
+    div_yield: Annotated[
+        float, typer.Option("--div-yield", "-q", help="Continuous dividend yield")
+    ] = 0.0,
+    relaxed: Annotated[
+        bool, typer.Option("--relaxed", help="Fit even if the butterfly check fails")
+    ] = False,
+    format: Annotated[
+        OutputFormat, typer.Option("--format", "-f", help="Output format")
+    ] = OutputFormat.TEXT,
+) -> None:
+    """Fit an SVI volatility smile to a set of quoted option prices."""
+    try:
+        strike_list = [float(x) for x in strikes.split(",")]
+        price_list = [float(x) for x in prices.split(",")]
+    except ValueError:
+        console.print("[red]Error:[/red] strikes and prices must be comma-separated numbers")
+        raise typer.Exit(1) from None
+
+    try:
+        surface = VolSurface.from_market_prices(
+            spot=spot,
+            strikes=strike_list,
+            prices=price_list,
+            time_to_maturity=time,
+            risk_free_rate=rate,
+            dividend_yield=div_yield,
+            option_type=cast(OptionType, option_type),
+        )
+        fit = surface.fit_relaxed() if relaxed else surface.fit()
+    except SVIError as exc:
+        console.print(f"[red]Error:[/red] {exc}")
+        if not relaxed:
+            console.print("[dim]Hint: --relaxed will fit anyway, so you can inspect it.[/dim]")
+        raise typer.Exit(1) from None
+
+    curve = fit.curve
+
+    if format == OutputFormat.JSON:
+        console.print_json(
+            json.dumps(
+                {
+                    "forward": surface.forward,
+                    "parameters": {
+                        "a": curve.a,
+                        "b": curve.b,
+                        "rho": curve.rho,
+                        "m": curve.m,
+                        "sigma": curve.sigma,
+                    },
+                    "rms_error": fit.rms_error,
+                    "max_error": fit.max_error,
+                    "arbitrage_free": {
+                        "parameters": curve.parameters_are_valid(),
+                        "butterfly": curve.butterfly_arbitrage_free(),
+                    },
+                    "strikes": list(fit.strikes),
+                    "market_vols": list(fit.market_vols),
+                    "model_vols": list(fit.model_vols),
+                }
+            )
+        )
+        return
+
+    table = Table(title=f"SVI smile (forward {surface.forward:.4f}, T={time:g}y)")
+    table.add_column("Strike", justify="right")
+    table.add_column("Market Vol", justify="right")
+    table.add_column("Model Vol", justify="right")
+    table.add_column("Error", justify="right")
+
+    for strike, market, model in zip(fit.strikes, fit.market_vols, fit.model_vols, strict=True):
+        table.add_row(
+            f"{strike:.2f}",
+            f"{market:.4%}",
+            f"{model:.4%}",
+            f"{model - market:+.4%}",
+        )
+    console.print(table)
+
+    console.print(
+        Panel.fit(
+            f"[bold]a     =[/bold] {curve.a:.6f}\n"
+            f"[bold]b     =[/bold] {curve.b:.6f}\n"
+            f"[bold]rho   =[/bold] {curve.rho:.6f}\n"
+            f"[bold]m     =[/bold] {curve.m:.6f}\n"
+            f"[bold]sigma =[/bold] {curve.sigma:.6f}\n"
+            f"[bold]min w =[/bold] {curve.minimum_total_variance():.6f}\n\n"
+            f"RMS error  : {fit.rms_error:.6%}\n"
+            f"Max error  : {fit.max_error:.6%}\n"
+            f"Butterfly  : {'free' if curve.butterfly_arbitrage_free() else 'VIOLATED'}",
+            title="Fitted parameters",
+            border_style="green" if curve.butterfly_arbitrage_free() else "red",
         )
     )
 

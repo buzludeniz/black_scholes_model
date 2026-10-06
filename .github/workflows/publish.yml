@@ -1,0 +1,128 @@
+# Publishing black-scholes to PyPI via Trusted Publishing (OIDC).
+#
+# One-time setup on pypi.org, done once by the project owner:
+#
+#   1. Register the project. Sign in at https://pypi.org and create a project
+#      with the distribution name that setuptools derives from pyproject.toml.
+#      pyproject.toml sets `name = "black-scholes"`, so the PyPI project name
+#      is `black-scholes` (not `black_scholes_model`). Note the README's
+#      install line currently says `black_scholes_model`; that is a README bug.
+#   2. On that project, go to Publishing -> Add a new publisher -> choose
+#      "GitHub".
+#   3. Fill in the publisher details exactly:
+#        Owner:              buzludeniz
+#        Repository name:    black_scholes_model
+#        Workflow name:      publish.yml
+#        Environment name:   pypi
+#      The workflow filename must match the file name exactly, so this file
+#      must stay named publish.yml.
+#      The environment name must be `pypi` because the publish job declares
+#      `environment: pypi`. PyPI matches this claim against the publisher
+#      record, and a mismatch fails with `invalid-publisher`. The GitHub
+#      environment is created automatically on the first run; adding approval
+#      rules to it is optional and gives you a manual gate before release.
+#   4. Save. No API token is created and no secret is stored in this repo.
+#
+# The publisher record is what authorises the OIDC exchange. Without it the
+# publish step fails with a 403 from PyPI even though the token exchange itself
+# succeeds.
+
+name: Publish
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install build tooling
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install build
+
+      # Guards against tagging v0.3.0 while pyproject.toml still says 0.2.0.
+      # PyPI rejects a duplicate filename, so a mismatch must fail before upload.
+      - name: Verify tag matches the declared version
+        if: github.ref_type == 'tag'
+        run: |
+          python - <<'PY'
+          import os
+          import re
+          import sys
+          from pathlib import Path
+
+          tag = os.environ["GITHUB_REF_NAME"].removeprefix("v")
+          text = Path("pyproject.toml").read_text(encoding="utf-8")
+          match = re.search(r'^version\s*=\s*"([^"]+)"', text, re.MULTILINE)
+          if match is None:
+              sys.exit("no version found in pyproject.toml")
+          version = match.group(1)
+          if tag != version:
+              sys.exit(f"tag {tag} does not match pyproject version {version}")
+          print(f"tag and pyproject version agree: {version}")
+          PY
+
+      - name: Build sdist and wheel
+        run: python -m build
+
+      - name: List artifacts
+        run: ls -l dist
+
+      # Install the wheel into a clean environment so the smoke test cannot
+      # accidentally pass against the source tree or an already-installed copy.
+      - name: Smoke test the built wheel
+        run: |
+          python -m venv smoke
+          smoke/bin/python -m pip install --upgrade pip
+          smoke/bin/python -m pip install dist/*.whl
+          smoke/bin/python -c "import black_scholes; print('imported version', black_scholes.__version__)"
+          smoke/bin/python -c "import black_scholes; print('spot price', black_scholes.black_scholes_price(black_scholes.OptionParams(100.0, 100.0, 1.0, 0.05, 0.20)))"
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: dist
+          path: dist/
+
+  publish:
+    name: publish
+    # Only runs once the wheel has been built, smoke tested, and stored.
+    needs: build
+    runs-on: ubuntu-latest
+    environment: pypi
+    # id-token: write is what enables Trusted Publishing. Without it the OIDC
+    # token cannot be minted and PyPI will reject the upload.
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v8
+        with:
+          name: dist
+          path: dist
+
+      # No `password:` input and no secrets reference: the action exchanges its
+      # OIDC token for a short-lived PyPI upload token automatically.
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1

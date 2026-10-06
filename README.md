@@ -27,6 +27,13 @@ pip install -e ".[dev]"
 
 Requires Python 3.10 or newer.
 
+The distribution is `black_scholes_model` but the import name is shorter,
+`black_scholes`:
+
+```python
+import black_scholes
+```
+
 ## Quick start
 
 ```python
@@ -113,6 +120,61 @@ d2 = d1 - σ·√T
 This is the European option model under geometric Brownian motion with a
 constant volatility and a continuous dividend yield.
 
+## Volatility surfaces
+
+Real markets do not quote a flat volatility, they quote a smile. The
+`black_scholes.surface` module fits that smile from market prices using the SVI
+parameterisation, and refuses to return a fit that would let someone price
+arbitrage out of it.
+
+```python
+from black_scholes.surface import VolSurface
+
+surface = VolSurface.from_market_prices(
+    spot=100.0,
+    strikes=[70.0, 90.0, 100.0, 110.0, 150.0],
+    prices=[34.3824, 18.0797, 11.7507, 7.4028, 1.3415],
+    time_to_maturity=1.0,
+    risk_free_rate=0.05,
+)
+
+fit = surface.fit()
+print(fit.curve.a, fit.curve.b, fit.curve.rho)  # SVI parameters
+print(fit.rms_error, fit.max_error)  # fit quality
+```
+
+From the shell:
+
+```bash
+bs fit-surface --spot 100 --time 1 --rate 0.05 \
+  --strikes "70,90,100,110,150" \
+  --prices  "34.3824,18.0797,11.7507,7.4028,1.3415"
+```
+
+### Why SVI
+
+Total implied variance is written as a function of log-moneyness `k = ln(K/F)`:
+
+```
+w(k) = a + b·(ρ·(k − m) + √((k − m)² + σ²))
+```
+
+Five parameters, and the shape stays economically sensible where a polynomial
+would eventually turn over: `b` sets the smile, `ρ` the skew, `σ` the wings.
+
+### Three guards, because a fit that looks valid can still be useless
+
+1. **Parameter arbitrage**, closed form: `b ≥ 0`, `|ρ| < 1`, `σ > 0`, and a
+   non-negative minimum total variance.
+2. **Butterfly arbitrage**, Gatheral's density condition, checked numerically:
+   `(1 − k·w′/2w)² − w′/4·(1/w + 1/4) + w″/2 ≥ 0`.
+3. **Error tolerance**: SVI cannot fit every quoted shape. Without this bound the
+   optimiser can return a curve that passes both arbitrage checks yet misses
+   the data by tens of volatility points, and report success.
+
+`fit_relaxed()` lifts guards 2 and 3 so a rejected fit can be inspected instead
+of vanishing.
+
 ## Development
 
 ```bash
@@ -128,30 +190,42 @@ python launch_gui.py         # run the GUI
 python examples/basic_usage.py
 ```
 
-Current state: 187 tests pass, 88% branch coverage (core module at 99%), with
-ruff and mypy clean.
+Current state: 349 tests pass, 97% branch coverage, with ruff and mypy clean.
+Every source module is above 91%; the GUI is at 100%.
 
 ## Known gaps
 
-Honest inventory of what is not done:
+Honest inventory of what is still not done:
 
-- **GUI coverage is 73%.** Widget construction and the market-price dialog are not
-  unit tested. `check_layout.py` covers geometry instead.
-- **No CI.** Tests run locally only; there is no GitHub Actions workflow.
-- **Not on PyPI.** `python -m build` produces valid artifacts, but the package is
-  not published, so `pip install black_scholes_model` will not yet resolve.
-- **No volatility surface fitting.** `implied_volatility` reads one point at a
-  time rather than fitting a parameterisation such as SVI.
-- **Single-asset only.** No basket, quanto, or correlation handling.
+- **Not on PyPI.** `python -m build` produces valid artifacts and a
+  Trusted-Publishing workflow is committed, but the package is not published, so
+  `pip install black_scholes_model` will not resolve until the PyPI project is
+  created and linked to the workflow.
+- **Calendar arbitrage is only checked pairwise.** `SVICurve` offers
+  `calendar_arbitrage_free` for two slices, but there is no term-structure
+  object that validates a whole surface at once.
+- **Butterfly arbitrage is a grid check, not a proof.** No closed form exists for
+  raw SVI, and SSVI's closed-form conditions come from a stricter
+  parameterisation that cannot fit every quoted smile. A finer grid can find
+  more violations, never fewer.
+- **No SABR or eSSVI.** SVI only.
+- **Single-expiry fitting only.** Multi-expiry surfaces are assembled by the
+  caller, one slice per expiry.
+- **Unweighted least squares.** The fit weights every strike equally rather
+  weighting by vega, which is what most practitioners do.
+- **No American options.** European exercise only.
 
 ## Limitations
 
 - European exercise only. American and Bermudan options are not implemented.
-- Constant volatility. There is no term structure or smile fitting, though
-  `implied_volatility` can be run per strike to read one off a surface.
+- `black_scholes_price` assumes a single flat volatility. For a real smile, price
+  each strike with its own implied volatility or use the fitted surface.
 - `implied_volatility` needs a no-arbitrage price and a volatility bracket that
   contains the answer. Prices at the theoretical bound require a wider bracket,
   and anything outside the bounds is rejected rather than extrapolated.
+- The SVI fit is a least-squares approximation. SVI cannot represent every
+  quoted shape, and the error bound exists so that failure is visible rather
+  than silent.
 
 ## License
 

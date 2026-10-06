@@ -3,7 +3,7 @@ requires = ["setuptools>=61.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "black-scholes"
+name = "black_scholes_model"
 version = "0.2.0"
 description = "Black-Scholes European option pricing with Greeks, implied volatility, and Monte Carlo validation"
 readme = "README.md"

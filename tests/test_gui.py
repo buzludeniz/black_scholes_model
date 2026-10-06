@@ -73,6 +73,41 @@ def _is_number(text: str) -> bool:
     return True
 
 
+def _is_destroyed(window) -> bool:
+    """True once ``window`` has been torn down.
+
+    Tk answers ``winfo_exists`` with 0 for a destroyed widget, and with a
+    ``TclError`` on some builds, so both spellings count as destroyed.
+    """
+    try:
+        return not window.winfo_exists()
+    except tk.TclError:
+        return True
+
+
+def _stub_market_price_dialog(monkeypatch, app, result):
+    """Replace the modal price prompt with a stub that never blocks.
+
+    ``BlackScholesGUI._on_iv`` calls ``root.wait_window(dialog)``, which returns
+    only once the dialog is destroyed. Letting that run for real would hang the
+    suite, so the dialog class is swapped for one whose ``result`` is fixed and
+    ``wait_window`` is neutralised. Returns the list of opened stubs.
+    """
+    opened = []
+
+    class StubDialog:
+        def __init__(self, parent, title, prompt):
+            self.parent = parent
+            self.title = title
+            self.prompt = prompt
+            self.result = result
+            opened.append(self)
+
+    monkeypatch.setattr(gui, "MarketPriceDialog", StubDialog)
+    monkeypatch.setattr(app.root, "wait_window", lambda *a, **k: None)
+    return opened
+
+
 # --- Parameter Parsing ---
 
 
@@ -223,6 +258,360 @@ class TestOnPrice:
         app._on_price()
         assert _is_number(app.price_var.get())
         assert float(app.price_var.get()) > 0
+
+
+# --- Monte Carlo Validation ---
+
+
+class TestOnPriceMonteCarlo:
+    """The optional Monte Carlo cross-check inside ``_on_price``."""
+
+    def test_monte_carlo_label_populated_when_enabled(self, app):
+        app.mc_var.set(True)
+        app._on_price()
+
+        label = app.mc_var_label.get()
+        assert label != ""
+        assert "MC=" in label
+        assert "OK" in label or "OUT OF TOLERANCE" in label
+        assert app.status_var.get() == "Done"
+
+    def test_monte_carlo_price_tracks_the_analytic_price(self, app):
+        app.mc_var.set(True)
+        app._on_price()
+
+        mc_price = float(app.mc_var_label.get().split("MC=")[1].split()[0])
+        assert mc_price == pytest.approx(10.450584, abs=0.5)
+
+    def test_seeded_sampling_is_deterministic(self, app):
+        app.mc_var.set(True)
+        app._on_price()
+        first = app.mc_var_label.get()
+        app._on_price()
+        assert app.mc_var_label.get() == first
+
+    def test_close_agreement_is_reported_as_ok(self, app, monkeypatch):
+        monkeypatch.setattr(gui, "monte_carlo_price", lambda *a, **k: (10.450584, 0.01))
+        app.mc_var.set(True)
+        app._on_price()
+        assert app.mc_var_label.get().endswith("OK")
+
+    def test_wild_disagreement_is_flagged(self, app, monkeypatch):
+        monkeypatch.setattr(gui, "monte_carlo_price", lambda *a, **k: (50.0, 0.01))
+        app.mc_var.set(True)
+        app._on_price()
+        assert app.mc_var_label.get().endswith("OUT OF TOLERANCE")
+
+    def test_tolerance_scales_with_the_standard_error(self, app, monkeypatch):
+        # Same 10.0 gap, but a wide standard error keeps it inside tolerance.
+        monkeypatch.setattr(gui, "monte_carlo_price", lambda *a, **k: (0.450584, 10.0))
+        app.mc_var.set(True)
+        app._on_price()
+        assert app.mc_var_label.get().endswith("OK")
+
+    def test_runs_a_hundred_thousand_seeded_paths(self, app, monkeypatch):
+        seen = {}
+
+        def fake_mc(params, *, n_paths, seed):
+            seen["n_paths"] = n_paths
+            seen["seed"] = seed
+            return 10.450584, 0.05
+
+        monkeypatch.setattr(gui, "monte_carlo_price", fake_mc)
+        app.mc_var.set(True)
+        app._on_price()
+        assert seen == {"n_paths": 100_000, "seed": 0}
+
+    def test_price_and_greeks_still_populate(self, app):
+        app.mc_var.set(True)
+        app._on_price()
+        assert float(app.price_var.get()) == pytest.approx(10.450584, abs=1e-6)
+        for key in GREEK_KEYS:
+            assert _is_number(app.greek_vars[key].get())
+
+    def test_label_is_cleared_when_the_box_is_unticked(self, app):
+        app.mc_var.set(True)
+        app._on_price()
+        assert app.mc_var_label.get() != ""
+
+        app.mc_var.set(False)
+        app._on_price()
+        assert app.mc_var_label.get() == ""
+
+
+# --- Implied Volatility ---
+
+
+class TestOnIv:
+    """Inverting an observed market price back into a volatility."""
+
+    def test_solved_volatility_is_written_to_the_vol_field(self, app, monkeypatch):
+        # 10.450584 is the analytic price of the default inputs at vol 0.20,
+        # so the inversion must return the value it started from.
+        _stub_market_price_dialog(monkeypatch, app, 10.450584)
+        app._on_iv()
+        assert app.entries["vol"].get() == "0.200000"
+
+    def test_status_reports_the_solved_volatility(self, app, monkeypatch):
+        _stub_market_price_dialog(monkeypatch, app, 10.450584)
+        app._on_iv()
+
+        status = app.status_var.get()
+        assert status.startswith("Implied vol:")
+        assert status == "Implied vol: 20.00%"
+
+    def test_success_shows_an_info_dialog(self, app, monkeypatch):
+        _stub_market_price_dialog(monkeypatch, app, 10.450584)
+        app._on_iv()
+
+        assert app.shown
+        assert app.shown[-1][0] == "info"
+        assert app.shown[-1][1][0] == "Implied Volatility"
+
+    def test_dialog_asks_for_a_market_price(self, app, monkeypatch):
+        opened = _stub_market_price_dialog(monkeypatch, app, 10.450584)
+        app._on_iv()
+
+        assert len(opened) == 1
+        assert opened[0].parent is app.root
+        assert opened[0].title == "Implied Volatility"
+        assert opened[0].prompt == "Enter observed market price:"
+
+    def test_high_market_price_implies_a_higher_volatility(self, app, monkeypatch):
+        _stub_market_price_dialog(monkeypatch, app, 25.0)
+        app._on_iv()
+
+        vol = float(app.entries["vol"].get())
+        assert vol > 0.20
+        assert "Implied vol:" in app.status_var.get()
+
+    def test_cancel_leaves_inputs_untouched(self, app, monkeypatch):
+        _set_field(app, "vol", "0.42")
+        _stub_market_price_dialog(monkeypatch, app, None)
+        app._on_iv()
+
+        assert app.status_var.get() == "Implied volatility cancelled"
+        assert app.entries["vol"].get() == "0.42"
+        assert app.shown == []
+
+    def test_cancel_shows_no_dialog(self, app, monkeypatch):
+        _stub_market_price_dialog(monkeypatch, app, None)
+        app._on_iv()
+        assert app.shown == []
+
+    def test_arbitrage_violating_price_reports_an_error(self, app, monkeypatch):
+        # 500.0 sits above the call's no-arbitrage ceiling of 100.0.
+        _stub_market_price_dialog(monkeypatch, app, 500.0)
+        app._on_iv()
+
+        assert app.status_var.get() == "Implied volatility failed"
+        assert app.shown[-1][0] == "error"
+        assert app.shown[-1][1][0] == "Implied Volatility Error"
+
+    def test_arbitrage_failure_leaves_the_vol_field_untouched(self, app, monkeypatch):
+        _set_field(app, "vol", "0.42")
+        _stub_market_price_dialog(monkeypatch, app, 500.0)
+        app._on_iv()
+
+        assert app.entries["vol"].get() == "0.42"
+        assert app.shown[-1][0] == "error"
+
+    def test_arbitrage_failure_shows_no_info_dialog(self, app, monkeypatch):
+        _stub_market_price_dialog(monkeypatch, app, 500.0)
+        app._on_iv()
+        assert all(kind != "info" for kind, _ in app.shown)
+
+    def test_solved_volatility_round_trips_through_the_form(self, app, monkeypatch):
+        _stub_market_price_dialog(monkeypatch, app, 25.0)
+        app._on_iv()
+        _set_field(app, "vol", app.entries["vol"].get())
+        app._on_price()
+
+        assert float(app.price_var.get()) == pytest.approx(25.0, abs=1e-3)
+
+    def test_invalid_params_never_open_the_dialog(self, app, monkeypatch):
+        opened = _stub_market_price_dialog(monkeypatch, app, 10.450584)
+        _set_field(app, "vol", "0")
+        app._on_iv()
+
+        assert opened == []
+        assert app.status_var.get() == "Ready"
+        assert app.shown[-1][0] == "error"
+
+    def test_put_params_are_inverted(self, app, monkeypatch):
+        app.option_type_var.set("put")
+        _stub_market_price_dialog(monkeypatch, app, 5.573526)
+        app._on_iv()
+
+        assert app.entries["vol"].get() == "0.200000"
+        assert app.status_var.get().startswith("Implied vol:")
+
+
+# --- Market Price Dialog ---
+
+
+@pytest.fixture
+def dialog(root, monkeypatch):
+    """A real MarketPriceDialog on a hidden parent, destroyed on teardown."""
+    monkeypatch.setattr(gui.messagebox, "showerror", lambda *a, **k: None)
+    monkeypatch.setattr(gui.messagebox, "showinfo", lambda *a, **k: None)
+
+    window = gui.MarketPriceDialog(root, "Implied Volatility", "Enter observed market price:")
+    try:
+        yield window
+    finally:
+        with contextlib.suppress(Exception):
+            window.destroy()
+
+
+class TestMarketPriceDialog:
+    """The modal that collects an observed market price."""
+
+    def test_starts_with_no_result_and_an_empty_field(self, dialog):
+        assert dialog.result is None
+        assert dialog.entry.get() == ""
+
+    def test_window_is_configured(self, dialog):
+        assert dialog.title() == "Implied Volatility"
+        assert dialog.wm_resizable() == (0, 0)
+        assert str(dialog.transient()) == str(dialog.master)
+
+    def test_ok_accepts_a_decimal_price(self, dialog):
+        dialog.entry.insert(0, "12.5")
+        dialog._on_ok()
+
+        assert dialog.result == pytest.approx(12.5)
+        assert _is_destroyed(dialog)
+
+    def test_ok_accepts_an_integer_price(self, dialog):
+        dialog.entry.insert(0, "42")
+        dialog._on_ok()
+
+        assert dialog.result == pytest.approx(42.0)
+        assert _is_destroyed(dialog)
+
+    def test_ok_rejects_non_numeric_input(self, dialog, monkeypatch):
+        errors = []
+        monkeypatch.setattr(gui.messagebox, "showerror", lambda *a, **k: errors.append(a))
+
+        dialog.entry.insert(0, "not a number")
+        dialog._on_ok()
+
+        assert dialog.result is None
+        assert not _is_destroyed(dialog)
+        assert errors
+        assert errors[-1][0] == "Invalid Input"
+        assert errors[-1][1] == "Please enter a valid number"
+
+    def test_ok_rejects_empty_input(self, dialog, monkeypatch):
+        errors = []
+        monkeypatch.setattr(gui.messagebox, "showerror", lambda *a, **k: errors.append(a))
+
+        dialog._on_ok()
+
+        assert dialog.result is None
+        assert not _is_destroyed(dialog)
+        assert errors
+
+    def test_rejected_input_can_be_corrected_and_accepted(self, dialog, monkeypatch):
+        errors = []
+        monkeypatch.setattr(gui.messagebox, "showerror", lambda *a, **k: errors.append(a))
+
+        dialog.entry.insert(0, "oops")
+        dialog._on_ok()
+        dialog.entry.delete(0, tk.END)
+        dialog.entry.insert(0, "3.5")
+        dialog._on_ok()
+
+        assert dialog.result == pytest.approx(3.5)
+        assert errors
+
+    def test_cancel_discards_the_entry_contents(self, dialog):
+        dialog.entry.insert(0, "12.5")
+        dialog._on_cancel()
+
+        assert dialog.result is None
+        assert _is_destroyed(dialog)
+
+    def test_return_and_escape_are_bound(self, dialog):
+        # Key delivery is not exercised: Tk only dispatches generated events to
+        # bindings on a mapped window, and this dialog's parent stays hidden.
+        # Asserting the bindings are registered keeps the line covered without
+        # depending on window visibility.
+        assert dialog.bind("<Return>")
+        assert dialog.bind("<Escape>")
+
+
+# --- Entry Point ---
+
+
+class TestRunGui:
+    """``run_gui`` wires a root, the app, and the mainloop together."""
+
+    @staticmethod
+    def _patch_gui(monkeypatch):
+        """Replace Tk and the app class with recorders; return the log."""
+        log = []
+
+        class FakeRoot:
+            def __init__(self):
+                log.append("root")
+
+            def mainloop(self):
+                log.append("mainloop")
+
+        def fake_app(root):
+            log.append(("app", root))
+
+        monkeypatch.setattr(gui.tk, "Tk", FakeRoot)
+        monkeypatch.setattr(gui, "BlackScholesGUI", fake_app)
+        return log
+
+    def test_creates_a_root_builds_the_app_and_runs_the_mainloop(self, monkeypatch):
+        log = self._patch_gui(monkeypatch)
+        gui.run_gui()
+
+        roots = [entry for entry in log if entry == "root"]
+        mainloops = [entry for entry in log if entry == "mainloop"]
+        apps = [entry for entry in log if isinstance(entry, tuple)]
+
+        assert roots == ["root"]
+        assert mainloops == ["mainloop"]
+        assert len(apps) == 1
+        assert apps[0][1] is not None
+
+    def test_the_mainloop_runs_exactly_once(self, monkeypatch):
+        log = self._patch_gui(monkeypatch)
+        gui.run_gui()
+        assert log.count("mainloop") == 1
+
+    def test_the_app_is_built_before_the_mainloop_starts(self, monkeypatch):
+        log = self._patch_gui(monkeypatch)
+        gui.run_gui()
+        assert log.index("root") < 1
+        assert log[-1] == "mainloop"
+
+    def test_the_app_receives_the_new_root(self, monkeypatch):
+        created = []
+
+        class FakeRoot:
+            def __init__(self):
+                created.append(self)
+
+            def mainloop(self):
+                pass
+
+        passed = []
+        monkeypatch.setattr(gui.tk, "Tk", FakeRoot)
+        monkeypatch.setattr(gui, "BlackScholesGUI", passed.append)
+        gui.run_gui()
+
+        assert len(created) == 1
+        assert passed == created
+
+    def test_returns_none(self, monkeypatch):
+        self._patch_gui(monkeypatch)
+        assert gui.run_gui() is None
 
 
 # --- Clear ---
