@@ -186,6 +186,7 @@ mypy src/black_scholes
 python -m build              # wheel and sdist
 
 python check_layout.py       # GUI layout audit, exits non-zero if clipped
+python demo_gui.py           # drive the real GUI widgets and print the display
 python launch_gui.py         # run the GUI
 python examples/basic_usage.py
 ```
