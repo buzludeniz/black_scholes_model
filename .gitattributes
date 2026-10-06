@@ -1,0 +1,32 @@
+# Normalise line endings in the repository, keep Windows checkouts native.
+# Without this, files committed from Windows get CRLF baked into history and
+# show as whole-file diffs on Linux and macOS.
+
+* text=auto eol=lf
+
+# Windows-native files
+*.bat  text eol=crlf
+*.cmd  text eol=crlf
+*.ps1  text eol=crlf
+
+# Binary assets that must never be touched
+*.png  binary
+*.jpg  binary
+*.jpeg binary
+*.gif  binary
+*.ico  binary
+*.pdf  binary
+*.whl  binary
+*.gz   binary
+*.zip  binary
+
+# Language-specific defaults
+*.py      text diff=python
+*.toml    text
+*.md      text
+*.yml     text
+*.yaml    text
+*.json    text
+*.cfg     text
+*.txt     text
+LICENSE   text
