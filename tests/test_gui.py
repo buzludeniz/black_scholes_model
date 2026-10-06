@@ -204,9 +204,9 @@ class TestOnPrice:
     def test_invalid_input_leaves_display_untouched(self, app):
         _set_field(app, "spot", "-100")
         app._on_price()
-        assert app.price_var.get() == BLANK
-        for key in GREEK_KEYS:
-            assert app.greek_vars[key].get() == BLANK
+        displayed = {key: app.greek_vars[key].get() for key in GREEK_KEYS}
+        displayed["price"] = app.price_var.get()
+        assert displayed == {"price": BLANK, **dict.fromkeys(GREEK_KEYS, BLANK)}
 
     def test_invalid_input_reports_error(self, app):
         _set_field(app, "vol", "0")

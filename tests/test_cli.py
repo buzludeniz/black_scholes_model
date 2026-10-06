@@ -40,6 +40,46 @@ def _json_price(result) -> float:
     return payload["price"]
 
 
+# --- Rich Table Parsing ---
+
+
+def _table_rows(stdout: str) -> list[list[str]]:
+    """Split Rich table body rows into their cell values.
+
+    Rich draws cell separators with U+2502; headers use U+2503, so matching
+    on U+2502 selects data rows only.
+    """
+    rows = []
+    for line in stdout.splitlines():
+        stripped = line.strip()
+        if stripped.startswith(_VBAR) and stripped.endswith(_VBAR) and stripped.count(_VBAR) > 2:
+            rows.append([c.strip() for c in stripped.strip(_VBAR).split(_VBAR)])
+    return rows
+
+
+def _column(stdout: str, index: int) -> list[str]:
+    """Extract one cell column from every body row of a table in the output."""
+    rows = _table_rows(stdout)
+    assert rows, "no table body rows found in output"
+    return [row[index] for row in rows]
+
+
+def _metric_value(stdout: str, label: str) -> float:
+    """Read a labelled numeric cell out of any Rich table in the output."""
+    for row in _table_rows(stdout):
+        if row[0] == label:
+            return float(row[1])
+    raise AssertionError(f"metric {label!r} not found in output")
+
+
+def _call_price_column(stdout: str) -> list[str]:
+    return _column(stdout, 1)
+
+
+def _delta_column(stdout: str) -> list[str]:
+    return _column(stdout, 2)
+
+
 # --- Price Command ---
 
 
@@ -185,6 +225,34 @@ class TestPriceMonteCarlo:
     def test_mc_paths_option_rejects_garbage(self, runner):
         result = runner.invoke(app, ["price", *BASE_ARGS, "call", "--mc", "--mc-paths", "many"])
         assert result.exit_code != 0
+
+    def test_mc_with_json_output_serialises(self, runner):
+        # Regression guard: the Monte Carlo block must stay JSON-serialisable.
+        # A numpy bool or scalar leaking in here raises TypeError at runtime
+        # rather than failing a value assertion, so parse the payload.
+        for option_type in ("call", "put"):
+            result = runner.invoke(
+                app,
+                ["price", *BASE_ARGS, option_type, "--mc", "--mc-paths", "20000", "-f", "json"],
+            )
+            assert result.exit_code == 0, result.stdout
+            payload = json.loads(result.stdout)
+            mc = payload["monte_carlo"]
+            assert set(mc) == {"price", "std_error", "diff", "within_2se"}
+            assert isinstance(mc["price"], float)
+            assert isinstance(mc["std_error"], float)
+            assert isinstance(mc["diff"], float)
+            assert isinstance(mc["within_2se"], bool)
+
+    def test_mc_json_diff_matches_parts(self, runner):
+        result = runner.invoke(
+            app, ["price", *BASE_ARGS, "call", "--mc", "--mc-paths", "20000", "-f", "json"]
+        )
+        assert result.exit_code == 0
+        payload = json.loads(result.stdout)
+        mc = payload["monte_carlo"]
+        assert mc["diff"] == pytest.approx(payload["price"] - mc["price"], abs=1e-9)
+        assert mc["within_2se"] == (abs(mc["diff"]) <= 2 * mc["std_error"])
 
     def test_no_mc_by_default(self, runner):
         result = runner.invoke(app, ["price", *BASE_ARGS, "call"])
@@ -381,43 +449,6 @@ class TestSurfaceCommand:
     def test_missing_required_option_exits_nonzero(self, runner):
         result = runner.invoke(app, ["surface", "-S", "100"])
         assert result.exit_code != 0
-
-
-def _table_rows(stdout: str) -> list[list[str]]:
-    """Split Rich table body rows into their cell values.
-
-    Rich draws cell separators with U+2502; headers use U+2503, so matching
-    on U+2502 selects data rows only.
-    """
-    rows = []
-    for line in stdout.splitlines():
-        stripped = line.strip()
-        if stripped.startswith(_VBAR) and stripped.endswith(_VBAR) and stripped.count(_VBAR) > 2:
-            rows.append([c.strip() for c in stripped.strip(_VBAR).split(_VBAR)])
-    return rows
-
-
-def _column(stdout: str, index: int) -> list[str]:
-    """Extract one cell column from every body row of the surface table."""
-    rows = _table_rows(stdout)
-    assert rows, "no table body rows found in output"
-    return [row[index] for row in rows]
-
-
-def _metric_value(stdout: str, label: str) -> float:
-    """Read a labelled numeric cell out of any Rich table in the output."""
-    for row in _table_rows(stdout):
-        if row[0] == label:
-            return float(row[1])
-    raise AssertionError(f"metric {label!r} not found in output")
-
-
-def _call_price_column(stdout: str) -> list[str]:
-    return _column(stdout, 1)
-
-
-def _delta_column(stdout: str) -> list[str]:
-    return _column(stdout, 2)
 
 
 # --- Greeks Command ---
