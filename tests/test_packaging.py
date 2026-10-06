@@ -117,5 +117,5 @@ class TestBuildArtifactsAreNotCommitted:
     def test_gitignore_covers_build_output(self):
         ignored = PYPROJECT.with_name(".gitignore").read_text(encoding="utf-8").splitlines()
         cleaned = {line.strip() for line in ignored if line.strip() and not line.startswith("#")}
-        for pattern in ("dist/", "build/", "*.egg-info/", ".smoke/"):
+        for pattern in ("dist/", "build/", "*.egg-info/", ".smoke/", ".smoke-sdist/"):
             assert pattern in cleaned, f"{pattern} must be gitignored"

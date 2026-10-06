@@ -193,7 +193,8 @@ python examples/basic_usage.py
 ```
 
 Current state: 576 tests pass, 97% line coverage, with ruff and mypy clean.
-The GUI, CLI, and the core engine are all at 97–100% coverage.
+Coverage per module: `gui.py` 100%, `black_scholes` core 99%, `cli.py` 97%,
+`surface.py` 93%.
 
 The coverage gate is enforced by CI, not by pytest `addopts`. A gate in
 `addopts` also applies to partial runs, so `pytest tests/test_gui.py` and even

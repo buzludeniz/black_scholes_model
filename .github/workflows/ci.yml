@@ -96,6 +96,19 @@ jobs:
           print('pricing ok:', round(price, 6))
           "
 
+          # The sdist is a build artifact too; a wheel-only install-test would
+          # not catch a missing file in the source tarball. Install it into a
+          # fresh venv and import from outside the checkout, same as above.
+          python -m venv "$REPO/.smoke-sdist"
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            PY2="$REPO/.smoke-sdist/Scripts/python.exe"
+          else
+            PY2="$REPO/.smoke-sdist/bin/python"
+          fi
+          "$PY2" -m pip install --upgrade pip
+          "$PY2" -m pip install "$REPO"/dist/*.tar.gz
+          "$PY2" -c "import black_scholes; print('sdist import ok:', black_scholes.__version__)"
+
   test:
     name: test (${{ matrix.os }}, py${{ matrix.python-version }})
     runs-on: ${{ matrix.os }}

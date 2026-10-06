@@ -72,6 +72,18 @@ def _parse_float_list(raw: str, name: str) -> list[float]:
     return values
 
 
+def _relaxed_would_bypass(exc: Exception) -> bool:
+    """Whether ``--relaxed`` can actually rescue this kind of fit failure.
+
+    Relaxed mode drops the butterfly rejection and the error-tolerance bound,
+    so it can only help those two. It cannot repair an optimiser that did not
+    converge or data that fails validation, and advertising it there would
+    mislead.
+    """
+    message = str(exc)
+    return "butterfly condition" in message or "cannot fit this smile" in message
+
+
 def _build_params(
     *,
     spot: float,
@@ -422,7 +434,10 @@ def fit_surface(
         fit = surface.fit_relaxed() if relaxed else surface.fit()
     except (SVIError, ValueError) as exc:
         console.print(f"[red]Error:[/red] {exc}")
-        if not relaxed:
+        # --relaxed bypasses only the butterfly rejection and the
+        # error-tolerance bound. For a non-convergence or invalid-input failure
+        # it would change nothing, so offering it would be a false promise.
+        if not relaxed and _relaxed_would_bypass(exc):
             console.print("[dim]Hint: --relaxed will fit anyway, so you can inspect it.[/dim]")
         raise typer.Exit(1) from None
 

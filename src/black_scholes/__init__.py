@@ -521,7 +521,7 @@ def implied_volatility(
         raise ValueError(f"market_price must be a finite number, got {market_price}")
     if not math.isfinite(tol) or tol <= 0:
         raise ValueError(f"tol must be positive, got {tol}")
-    if max_iter <= 0:
+    if not math.isfinite(max_iter) or max_iter <= 0:
         raise ValueError(f"max_iter must be positive, got {max_iter}")
     if not math.isfinite(vol_lower) or vol_lower <= 0:
         raise ValueError(f"vol_lower must be positive, got {vol_lower}")
