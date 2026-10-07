@@ -70,6 +70,15 @@ class SVIError(ValueError):
 
 SVI_FIT_FAILURE = "SVI fit did not converge to an arbitrage-free parameter set"
 
+#: Floor on the grid used to locate stationary points in the calendar check.
+#:
+#: The stationary-point scan must not inherit the caller's resolution, because a
+#: coarse grid can hide a genuine local extremum inside a single cell. See
+#: :meth:`SVICurve.calendar_arbitrage_free`. The derivative of a difference of
+#: two SVI slices is smooth with a small number of zeros, so a few hundred
+#: samples separate them reliably.
+_CALENDAR_SEARCH_MIN_POINTS = 513
+
 
 def check_parameters(a: float, b: float, rho: float, m: float, sigma: float) -> bool:
     """Whether raw SVI parameters satisfy the closed-form arbitrage conditions.
@@ -420,21 +429,34 @@ class SVICurve:
         # Otherwise look for extrema the grid may have stepped over. The
         # derivative of the difference is analytic, so each sign change in it
         # brackets exactly one stationary point, which bisection locates.
+        #
+        # This search runs on its own grid, independent of ``points``. Deriving
+        # it from the caller's grid left a real gap: the derivative can be
+        # positive only in a narrow band, so on a coarse grid both ends of a
+        # cell sharing that band report the same sign, no sign change is seen,
+        # and a genuine local extremum goes unexamined. Two slices whose
+        # difference rose to +0.026 and fell to -0.55 inside a single cell were
+        # reported free of calendar arbitrage. Missing an extremum here is a
+        # false negative in an arbitrage check, which is the dangerous direction,
+        # so the resolution of this scan is not left to the caller.
+        search_points = max(points, _CALENDAR_SEARCH_MIN_POINTS)
+
         def slope(x: float) -> float:
             return float(self._d1_vector(np.array([x]))[0] - other._d1_vector(np.array([x]))[0])
 
         def value(x: float) -> float:
             return self.total_variance(x) - other.total_variance(x)
 
-        d_slope = self._d1_vector(k) - other._d1_vector(k)
-        candidates = [float(k[0]), float(k[-1])]
+        search_k = np.linspace(k_low, k_high, search_points)
+        d_slope = self._d1_vector(search_k) - other._d1_vector(search_k)
+        candidates = [float(search_k[0]), float(search_k[-1])]
 
-        for index in range(k.size - 1):
+        for index in range(search_k.size - 1):
             left, right = float(d_slope[index]), float(d_slope[index + 1])
             if left == 0.0:
-                candidates.append(float(k[index]))
+                candidates.append(float(search_k[index]))
             elif left * right < 0.0:
-                low, high = float(k[index]), float(k[index + 1])
+                low, high = float(search_k[index]), float(search_k[index + 1])
                 for _ in range(60):
                     mid = 0.5 * (low + high)
                     if slope(low) * slope(mid) <= 0.0:

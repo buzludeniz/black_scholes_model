@@ -444,6 +444,17 @@ def implied_volatility(
             positive, or if ``market_price`` lies outside the no-arbitrage
             bounds.
 
+    A far out-of-the-money option at a short maturity has almost no time value,
+    so its price is flat in volatility over a wide range and any interior point
+    of that plateau fits equally well. Converging on the residual alone returned
+    an arbitrary 62.50% for a price generated at 84.62%. Weighting the residual
+    test by whether the bracket actually separates prices recovers a usable
+    answer:
+
+    >>> flat = OptionParams(275.3, 522.1, 0.009281, 0.05, 0.8462, OptionType.PUT)
+    >>> round(implied_volatility(black_scholes_price(flat), flat), 3)
+    0.85
+
     Solver options are validated before any pricing runs, so a misconfigured
     call fails immediately rather than returning a plausible wrong number:
 
@@ -562,10 +573,31 @@ def implied_volatility(
             vol_lower, vol_upper = narrowed_low, narrowed_high
             f_low, f_high = nf_low, nf_high
 
+    # Price noise floor for judging whether the current bracket discriminates
+    # between volatilities. Scaled by the underlying and strike rather than by
+    # the option price: the Black-Scholes formula subtracts two large terms, so a
+    # deeply in-the-money option priced near its intrinsic value carries
+    # cancellation error of order max(S, K) * eps, not price * eps. Scaled to the
+    # price instead, a 246.56 put on a 275/522 option looks like it discriminates
+    # when it is in fact flat.
+    noise = 1e-9 * max(params.spot, params.strike, 1.0)
+
     for _ in range(max_iter):
         mid = 0.5 * (vol_lower + vol_upper)
         f_mid = price_at(mid) - market_price
-        if abs(f_mid) < tol or (vol_upper - vol_lower) < tol:
+        # Converging on a small residual is only meaningful when the bracket
+        # actually separates prices. A far out-of-the-money option at a short
+        # maturity carries no time value, so its price is flat to within the
+        # last floating-point unit across a wide range of volatilities. There
+        # |f_mid| is under tolerance everywhere, and returning the first such
+        # midpoint yields an arbitrary interior volatility: measured, a price
+        # generated at 84.62% came back as 62.50%, a 26% error raised as a
+        # result. Where the price is flat, bracket width drives the search
+        # instead, which walks the answer to the bracket edge. That matches the
+        # established convention for a price sitting on its intrinsic value,
+        # where the identifiable answer is a volatility near zero.
+        discriminating = abs(price_at(vol_upper) - price_at(vol_lower)) > noise
+        if (discriminating and abs(f_mid) < tol) or (vol_upper - vol_lower) < tol:
             return float(mid)
         if f_low * f_mid <= 0:
             vol_upper, f_high = mid, f_mid

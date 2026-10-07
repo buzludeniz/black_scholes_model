@@ -321,6 +321,36 @@ class TestImpliedVolatility:
         iv = implied_volatility(hi, ATM_CALL, vol_upper=1e4)
         assert iv > 100.0
 
+    def test_flat_price_does_not_return_an_arbitrary_volatility(self):
+        """A price with no time value must not invert to a plateau midpoint.
+
+        This deep out-of-the-money put at a short maturity is priced at its
+        intrinsic value to within floating-point noise across a wide range of
+        volatilities. Converging on a small residual alone met |f_mid| < tol on
+        the second iteration and returned 0.625001 for a price generated at
+        0.8462, a 26% error reported as a successful inversion.
+        """
+        params = OptionParams(275.3, 522.1, 0.009281, 0.05, 0.8462, OptionType.PUT)
+        price = black_scholes_price(params)
+        recovered = implied_volatility(price, params)
+        assert recovered == pytest.approx(0.8462, rel=0.05), (
+            f"recovered {recovered!r} from a price generated at 0.8462"
+        )
+
+    def test_flat_price_detection_is_scoped_to_the_underlying(self):
+        """The noise floor scales with max(S, K), not with the option price.
+
+        Pricing a 522-strike put off a 275 spot subtracts two large terms, so
+        the cancellation error is of order max(S, K) * eps. Scaling to the price
+        instead would treat the flat region as informative.
+        """
+        params = OptionParams(275.3, 522.1, 0.009281, 0.05, 0.8462, OptionType.PUT)
+        price = black_scholes_price(params)
+        noise = 1e-9 * max(params.spot, params.strike, 1.0)
+        # The flat region is genuinely flat at the noise scale, so the bracket
+        # does not discriminate and the residual criterion is skipped.
+        assert noise > 1e-9 * price
+
     def test_volatility_smile_roundtrip(self):
         """Non-flat smile: each point must invert back to its own vol."""
         smile = [(90.0, 0.28), (100.0, 0.20), (110.0, 0.24)]

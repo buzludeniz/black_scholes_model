@@ -8,6 +8,7 @@ numerical form, the fitter, and the market-price inversion path.
 from __future__ import annotations
 
 import math
+from typing import ClassVar
 
 import numpy as np
 import pytest
@@ -468,6 +469,67 @@ class TestCalendarArbitrageResolution:
         shifted = SVICurve(0.04, 0.10, -0.30, -3.98, 0.15)
         free = TRUTH.calendar_arbitrage_free(shifted, k_low=-4.0, k_high=4.0, points=points)
         assert free is False
+
+    #: Two pairs whose difference has a local maximum and minimum inside a single
+    #: cell of a coarse grid. The derivative is positive only in a narrow band,
+    #: so a 3-point grid sees equal signs at both ends of that cell, misses the
+    #: extremum, and reports the slices as free even though they cross. Found by
+    #: stress-probing the kernel rather than by the public API tests.
+    COARSE_GRID_TRAPS: ClassVar[list[tuple[SVICurve, SVICurve]]] = [
+        (
+            SVICurve(
+                0.08829679600921114,
+                0.42135683536762275,
+                -0.8700915103983988,
+                -0.8422221651200972,
+                0.3745157180181201,
+            ),
+            SVICurve(
+                0.07343341363374854,
+                0.46674056527908275,
+                -0.6031955349001634,
+                -0.5175824454247353,
+                0.18938982532132864,
+            ),
+        ),
+        (
+            SVICurve(
+                0.17709149960514176,
+                0.2388409635475635,
+                -0.48553468221851687,
+                -1.918375636325012,
+                0.4027893065574432,
+            ),
+            SVICurve(
+                0.1400065174363586,
+                0.39893056898755197,
+                0.29112282747807816,
+                -0.5366129694943043,
+                0.2690889603497009,
+            ),
+        ),
+    ]
+
+    @pytest.mark.parametrize(("left", "right"), COARSE_GRID_TRAPS)
+    def test_extremum_hidden_inside_one_coarse_cell_is_still_found(self, left, right):
+        """The stationary-point scan must not inherit the caller's resolution.
+
+        Both pairs genuinely cross: their difference runs from -0.55 to +0.026
+        and from -1.57 to +0.11 respectively, so neither is close to a tangency.
+        Before the stationary-point scan was given its own grid, a 3-point grid
+        reported both as free of calendar arbitrage, which is a false negative
+        in an arbitrage check.
+        """
+        dense = np.linspace(-4.0, 4.0, 400_001)
+        difference = left.total_variance_vector(dense) - right.total_variance_vector(dense)
+        assert difference.min() < 0.0 < difference.max(), "precondition: they really cross"
+
+        assert left.calendar_arbitrage_free(right, points=3) is False
+
+    @pytest.mark.parametrize(("left", "right"), COARSE_GRID_TRAPS)
+    @pytest.mark.parametrize("points", [3, 5, 11, 51, 201, 2001])
+    def test_trap_pairs_agree_at_every_resolution(self, left, right, points):
+        assert left.calendar_arbitrage_free(right, points=points) is False
 
     def test_crossing_outside_the_searched_range_is_not_reported(self):
         """The documented limit: the given range bounds what is checked."""
