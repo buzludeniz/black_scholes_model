@@ -8,6 +8,7 @@ numerical form, the fitter, and the market-price inversion path.
 from __future__ import annotations
 
 import math
+import re
 from typing import ClassVar
 
 import numpy as np
@@ -569,6 +570,16 @@ class TestCalendarArbitrageResolution:
         assert TRUTH.calendar_arbitrage_free(grazes, points=points) is True
 
 
+def _strike_named_in(message: str) -> str | None:
+    """Extract the strike quoted in a fit-failure message.
+
+    Parsed rather than substring-matched because the separator after the number
+    is punctuation ("strike 100,"), so a fixed trailing space misses it.
+    """
+    match = re.search(r"at strike\s+([0-9.]+)", message)
+    return match.group(1) if match else None
+
+
 class TestFitTolerance:
     """The error bound that stops an unfittable shape being called a fit."""
 
@@ -590,12 +601,30 @@ class TestFitTolerance:
         )
 
     def test_error_message_names_strike_and_tolerance(self):
+        """The offending strike must be named, whichever one it turns out to be.
+
+        The worst-error strike comes out of a non-convex optimisation whose
+        converged local optimum shifts with the SciPy and NumPy versions and the
+        platform: this reported strike 100 on one machine and 80 on CI. Naming a
+        specific strike here tested the optimiser's path rather than the
+        message, and failed in CI while passing locally.
+        """
         with pytest.raises(SVIError) as info:
             fit_svi(100.0, self.SPIKE_K, self.SPIKE_V, 1.0)
         message = str(info.value)
         assert "worst error" in message
         assert "tolerance" in message
-        assert "100" in message, "the offending strike should be named"
+
+        named = {f"{k:g}" for k in self.SPIKE_K}
+        reported = _strike_named_in(message)
+        assert reported in named, f"a quoted strike should be named, got {reported!r}"
+
+    @pytest.mark.parametrize("weights", ["vega", "uniform"])
+    def test_error_message_names_a_quoted_strike_under_both_weightings(self, weights):
+        with pytest.raises(SVIError) as info:
+            fit_svi(100.0, self.SPIKE_K, self.SPIKE_V, 1.0, weights=weights)
+        message = str(info.value)
+        assert _strike_named_in(message) in {f"{k:g}" for k in self.SPIKE_K}, message
 
     def test_zero_tolerance_rejects_any_mismatch(self):
         strikes = np.array([70.0, 90.0, 100.0, 110.0, 150.0])
