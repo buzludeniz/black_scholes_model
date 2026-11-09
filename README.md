@@ -5,25 +5,24 @@ Greek set, implied-volatility inversion, and a vectorised Monte Carlo reference
 implementation for cross-checking.
 
 - **Correct by construction.** Put-call parity is exact to 1e-10, Greeks are
-  validated against finite differences, and every public function carries
-  runnable doctests.
+  validated against finite differences, and every public library function
+  carries runnable doctests.
 - **Three front ends.** Python API, a `bs` CLI, and a Tkinter GUI.
-- **Honest numbers.** Every function returns a native `float`, not a NumPy
+- **Honest numbers.** Every numeric result is a native `float`, not a NumPy
   scalar, so results serialise cleanly.
 
 ## Install
 
-```bash
-pip install black_scholes_model
-```
-
-From a checkout, with the development extras:
+The package is not on PyPI yet (see *Known gaps*), so install from a checkout,
+with the development extras:
 
 ```bash
 git clone https://github.com/buzludeniz/black_scholes_model.git
 cd black_scholes_model
 pip install -e ".[dev]"
 ```
+
+Once it is published, `pip install black_scholes_model` will work too.
 
 Requires Python 3.10 or newer.
 
@@ -167,7 +166,7 @@ would eventually turn over: `b` sets the smile, `ρ` the skew, `σ` the wings.
 1. **Parameter arbitrage**, closed form: `b ≥ 0`, `|ρ| < 1`, `σ > 0`, and a
    non-negative minimum total variance.
 2. **Butterfly arbitrage**, Gatheral's density condition, checked numerically:
-   `(1 − k·w′/2w)² − w′/4·(1/w + 1/4) + w″/2 ≥ 0`.
+   `(1 − k·w′/2w)² − (w′)²/4·(1/w + 1/4) + w″/2 ≥ 0`.
 3. **Error tolerance**: SVI cannot fit every quoted shape. Without this bound the
    optimiser can return a curve that passes both arbitrage checks yet misses
    the data by tens of volatility points, and report success.
@@ -226,8 +225,6 @@ Honest inventory of what is still not done:
 - **No SABR or eSSVI.** SVI only.
 - **Single-expiry fitting only.** Multi-expiry surfaces are assembled by the
   caller, one slice per expiry.
-- **Unweighted least squares.** The fit weights every strike equally rather
-  weighting by vega, which is what most practitioners do.
 - **No American options.** European exercise only.
 
 ## Limitations
