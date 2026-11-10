@@ -277,6 +277,14 @@ class SVICurve:
         root = math.sqrt(shifted * shifted + self.sigma * self.sigma)
         return self.b * self.sigma * self.sigma / (root**3)
 
+    def _d2_vector(self, k: np.ndarray) -> np.ndarray:
+        """Vectorised :meth:`_d2`, used by the butterfly condition."""
+        k_arr = np.asarray(k, dtype=float)
+        shifted = k_arr - self.m
+        root = np.sqrt(shifted * shifted + self.sigma * self.sigma)
+        result: np.ndarray = self.b * self.sigma * self.sigma / root**3
+        return result
+
     def jump_wings_parameters(self, maturity: float) -> dict[str, float]:
         """SVI-Jump-Wings parameters, which practitioners can read directly.
 
@@ -512,10 +520,8 @@ class SVICurve:
         if np.any(w <= 0):
             return False
 
-        shifted = k - self.m
-        root = np.sqrt(shifted * shifted + self.sigma * self.sigma)
-        w_prime = self.b * (self.rho + shifted / root)
-        w_double_prime = self.b * self.sigma**2 / root**3
+        w_prime = self._d1_vector(k)
+        w_double_prime = self._d2_vector(k)
 
         term_a = 1.0 - k * w_prime / (2.0 * w)
         term_b = 0.25 * w_prime**2 * (1.0 / w + 0.25)

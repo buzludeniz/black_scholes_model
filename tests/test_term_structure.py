@@ -403,3 +403,20 @@ class TestFromSurfaces:
         surfaces = [self.surface_from(MID, 1.0), self.surface_from(MID, 1.0)]
         with pytest.raises(SVIError, match="duplicate expiry"):
             TermStructure.from_surfaces(surfaces)
+
+
+class TestSharedDerivatives:
+    """The butterfly checks reuse SVICurve's derivative helpers."""
+
+    def test_vector_derivatives_match_scalar_and_finite_differences(self):
+        k = np.linspace(-1.5, 1.5, 31)
+        h = 1e-4
+        for curve in (SHORT, MID, LONG):
+            d1, d2 = curve._d1_vector(k), curve._d2_vector(k)
+            for x, first, second in zip(k, d1, d2, strict=True):
+                x = float(x)
+                assert first == pytest.approx(curve._d1(x), rel=1e-14, abs=1e-15)
+                assert second == pytest.approx(curve._d2(x), rel=1e-14)
+                up, mid, down = (curve.total_variance(x + s) for s in (h, 0.0, -h))
+                assert first == pytest.approx((up - down) / (2 * h), abs=1e-7)
+                assert second == pytest.approx((up - 2 * mid + down) / (h * h), rel=1e-4)

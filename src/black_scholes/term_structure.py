@@ -508,12 +508,7 @@ class TermStructure:
         weight = (maturity - t_lo) / (t_hi - t_lo)
 
         def derivatives(curve: SVICurve) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-            shifted = k - curve.m
-            root = np.sqrt(shifted * shifted + curve.sigma * curve.sigma)
-            w = curve.total_variance_vector(k)
-            w1 = curve.b * (curve.rho + shifted / root)
-            w2 = curve.b * curve.sigma**2 / root**3
-            return w, w1, w2
+            return curve.total_variance_vector(k), curve._d1_vector(k), curve._d2_vector(k)
 
         lo, hi = derivatives(self.curves[index - 1]), derivatives(self.curves[index])
         w, w1, w2 = (low + weight * (high - low) for low, high in zip(lo, hi, strict=True))
