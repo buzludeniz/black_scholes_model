@@ -885,9 +885,9 @@ class VolSurface:
     """An implied-volatility smile built from market option prices.
 
     Prices are inverted with the closed-form solver, then a single expiry is
-    fitted with SVI. Multi-expiry surfaces are built by calling
-    :meth:`from_market_prices` per expiry; calendar arbitrage across expiries is
-    the caller's check, not this class's.
+    fitted with SVI. For several expiries, build one per expiry and stack the
+    fits with :meth:`black_scholes.term_structure.TermStructure.from_surfaces`,
+    which checks calendar arbitrage across them.
 
     >>> surface = VolSurface.from_market_prices(
     ...     spot=100.0,
