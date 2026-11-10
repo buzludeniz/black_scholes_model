@@ -1,7 +1,7 @@
 """
 Tests for the Typer command-line interface.
 
-Exercises the four commands (price, iv, surface, greeks) through
+Exercises the commands (price, iv, surface, greeks, american) through
 typer.testing.CliRunner, covering text and JSON output, option parsing,
 error exit codes, and the implied-volatility round trip.
 """
@@ -840,3 +840,62 @@ class TestCliJsonOutputStaysValid:
         assert result.exit_code == 1
         with pytest.raises(json.JSONDecodeError):
             json.loads(result.stdout)
+
+
+class TestAmericanCommand:
+    """`bs american`: CRR tree and Barone-Adesi-Whaley next to the European."""
+
+    def test_text_output_shows_both_methods(self, runner):
+        result = runner.invoke(app, ["american", *BASE_ARGS, "put"])
+        assert result.exit_code == 0, result.output
+        assert "European (Black-Scholes)" in result.stdout
+        assert "CRR tree (1000 steps)" in result.stdout
+        assert "Barone-Adesi-Whaley" in result.stdout
+        assert f"{BASE_PUT_PRICE:.6f}" in result.stdout
+
+    def test_json_matches_library(self, runner):
+        from black_scholes import OptionParams, OptionType
+        from black_scholes.american import barone_adesi_whaley_price, binomial_price
+
+        result = runner.invoke(
+            app, ["american", *BASE_ARGS, "p", "-q", "0.01", "--steps", "200", "-f", "json"]
+        )
+        assert result.exit_code == 0, result.output
+        payload = json.loads(result.stdout)
+        params = OptionParams(100.0, 100.0, 1.0, 0.05, 0.2, OptionType.PUT, 0.01)
+        assert payload["american"]["crr"] == pytest.approx(binomial_price(params, 200))
+        assert payload["american"]["baw"] == pytest.approx(barone_adesi_whaley_price(params))
+        assert payload["steps"] == 200
+        assert payload["early_exercise_premium"]["crr"] > 0
+        assert payload["early_exercise_premium"]["baw"] > 0
+
+    def test_no_dividend_call_has_zero_premium(self, runner):
+        """The CRR premium is against the same tree, so it is exactly zero here."""
+        result = runner.invoke(app, ["american", *BASE_ARGS, "call", "-n", "200", "-f", "json"])
+        payload = json.loads(result.stdout)
+        assert payload["early_exercise_premium"] == {"crr": 0.0, "baw": 0.0}
+        assert payload["american"]["baw"] == pytest.approx(BASE_CALL_PRICE, abs=1e-12)
+
+    @pytest.mark.parametrize(("method", "keys"), [("crr", ["crr"]), ("baw", ["baw"])])
+    def test_single_method(self, runner, method, keys):
+        result = runner.invoke(app, ["american", *BASE_ARGS, "p", "-m", method, "-f", "json"])
+        assert result.exit_code == 0, result.output
+        payload = json.loads(result.stdout)
+        assert list(payload["american"]) == keys
+        assert (payload["steps"] is None) == (method == "baw")
+
+    def test_zero_steps_rejected(self, runner):
+        result = runner.invoke(app, ["american", *BASE_ARGS, "p", "--steps", "0"])
+        assert result.exit_code != 0
+
+    def test_coarse_tree_error_is_one_line(self, runner):
+        result = runner.invoke(app, ["american", "100", "100", "10", "0.5", "0.01", "c", "-n", "1"])
+        assert result.exit_code == 1
+        assert "Error:" in result.stdout
+        assert "increase steps" in result.stdout
+        assert "Traceback" not in result.stdout
+
+    def test_invalid_params_error(self, runner):
+        result = runner.invoke(app, ["american", "0", "100", "1", "0.05", "0.2", "p"])
+        assert result.exit_code == 1
+        assert "spot must be positive" in result.stdout

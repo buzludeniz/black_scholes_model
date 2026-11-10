@@ -81,6 +81,12 @@ bs greeks 100 100 1 0.05 0.2 call
 `call` also accepts `c` and `put` accepts `p`. Use `-q/--div-yield` for a
 continuous dividend yield.
 
+```bash
+# American option: CRR binomial tree and Barone-Adesi-Whaley, next to the European
+bs american 100 100 1 0.05 0.2 put
+bs american 100 100 1 0.05 0.2 put --method crr --steps 2000 --format json
+```
+
 ## Graphical interface
 
 ```bash
@@ -102,6 +108,30 @@ volatility behind a market price.
 | `implied_volatility(price, params)` | Invert price to volatility |
 | `arbitrage_bounds(params)` | No-arbitrage price interval |
 | `monte_carlo_price(params, ...)` | Simulated price with standard error |
+
+American exercise lives in `black_scholes.american`:
+
+| Function | Purpose |
+|----------|---------|
+| `binomial_price(params, steps=1000, american=True)` | Cox-Ross-Rubinstein tree, with continuous dividend yield |
+| `barone_adesi_whaley_price(params)` | Barone-Adesi-Whaley (1987) quadratic approximation |
+| `american_price(params, method="crr" \| "baw")` | Either of the above |
+
+```python
+from black_scholes import OptionParams, OptionType
+from black_scholes.american import barone_adesi_whaley_price, binomial_price
+
+put = OptionParams(100.0, 100.0, 1.0, 0.05, 0.20, OptionType.PUT)
+binomial_price(put, steps=2000)  # 6.090
+barone_adesi_whaley_price(put)  # 6.098
+```
+
+The tree converges to the true value as `steps` grows (it reproduces Hull's
+published American-put tree values). BAW is much faster and is within about a
+cent of the tree for short maturities, but it is an approximation: for one-year,
+40%-volatility options near the exercise boundary it can be off by ten cents or
+so on a 100 strike. With no dividend an American call equals the European call,
+and both methods return exactly that.
 
 Greek units: Vega is per 1% volatility move, Theta is per calendar day, Rho is per
 1% rate move. Gamma and Vega are identical for calls and puts.
@@ -255,11 +285,13 @@ Honest inventory of what is still not done:
 - **Slices are fitted independently.** `TermStructure.from_surfaces` fits each
   expiry on its own and then checks calendar arbitrage; it does not fit the
   expiries jointly under a calendar constraint.
-- **No American options.** European exercise only.
+- **No American Greeks.** `black_scholes.american` prices American options
+  but does not compute their Greeks; Bermudan exercise is not supported.
 
 ## Limitations
 
-- European exercise only. American and Bermudan options are not implemented.
+- American options are priced by a binomial tree or the Barone-Adesi-Whaley
+  approximation; Bermudan options are not implemented.
 - `black_scholes_price` assumes a single flat volatility. For a real smile, price
   each strike with its own implied volatility or use the fitted surface.
 - `implied_volatility` needs a no-arbitrage price and a volatility bracket that
