@@ -21,6 +21,11 @@ from black_scholes import (
     monte_carlo_price,
     price_option,
 )
+from black_scholes.american import (
+    DEFAULT_STEPS,
+    barone_adesi_whaley_price,
+    binomial_price,
+)
 from black_scholes.surface import SVIError, VolSurface
 
 app = typer.Typer(
@@ -385,6 +390,92 @@ def greeks(
             border_style="blue",
         )
     )
+
+
+class AmericanMethod(str, Enum):
+    BOTH = "both"
+    CRR = "crr"
+    BAW = "baw"
+
+
+@app.command()
+def american(
+    spot: Annotated[float, typer.Argument(help="Current underlying price (S)")],
+    strike: Annotated[float, typer.Argument(help="Strike price (K)")],
+    time: Annotated[float, typer.Argument(help="Time to maturity in years (T)")],
+    rate: Annotated[float, typer.Argument(help="Risk-free rate (r)")],
+    vol: Annotated[float, typer.Argument(help="Volatility (vol)")],
+    option_type: Annotated[
+        str, typer.Argument(help="Option type: call/c or put/p", parser=_parse_option_type)
+    ],
+    div_yield: Annotated[
+        float, typer.Option("--div-yield", "-q", help="Continuous dividend yield")
+    ] = 0.0,
+    method: Annotated[
+        AmericanMethod,
+        typer.Option(
+            "--method",
+            "-m",
+            help="crr (binomial tree), baw (Barone-Adesi-Whaley) or both",
+        ),
+    ] = AmericanMethod.BOTH,
+    steps: Annotated[
+        int, typer.Option("--steps", "-n", help="Binomial tree steps", min=1)
+    ] = DEFAULT_STEPS,
+    format: Annotated[
+        OutputFormat, typer.Option("--format", "-f", help="Output format")
+    ] = OutputFormat.TEXT,
+) -> None:
+    """Price an American option (early exercise) next to its European value."""
+    params = _build_params(
+        spot=spot,
+        strike=strike,
+        time_to_maturity=time,
+        risk_free_rate=rate,
+        volatility=vol,
+        option_type=cast(OptionType, option_type),
+        dividend_yield=div_yield,
+    )
+
+    european = price_option(params).price
+    # The premium is measured against a European price from the same method.
+    # For the tree that is the European tree with the same steps: against the
+    # closed form, the tree's discretisation error would leak into the
+    # premium and could even make it negative.
+    prices: dict[str, float] = {}
+    premiums: dict[str, float] = {}
+    try:
+        if method in (AmericanMethod.BOTH, AmericanMethod.CRR):
+            prices["crr"] = binomial_price(params, steps)
+            premiums["crr"] = prices["crr"] - binomial_price(params, steps, american=False)
+        if method in (AmericanMethod.BOTH, AmericanMethod.BAW):
+            prices["baw"] = barone_adesi_whaley_price(params)
+            premiums["baw"] = prices["baw"] - european
+    except ValueError as exc:
+        _fail(str(exc))
+
+    if format == OutputFormat.JSON:
+        console.print_json(
+            json.dumps(
+                {
+                    "european": european,
+                    "american": prices,
+                    "early_exercise_premium": premiums,
+                    "steps": steps if "crr" in prices else None,
+                }
+            )
+        )
+        return
+
+    labels = {"crr": f"American, CRR tree ({steps} steps)", "baw": "American, Barone-Adesi-Whaley"}
+    table = Table(title=f"American {params.option_type.value.capitalize()} Option")
+    table.add_column("Method", style="cyan")
+    table.add_column("Price", justify="right", style="green")
+    table.add_column("Early-exercise premium", justify="right")
+    table.add_row("European (Black-Scholes)", f"{european:.6f}", "")
+    for name, value in prices.items():
+        table.add_row(labels[name], f"[bold]{value:.6f}[/bold]", f"{premiums[name]:.6f}")
+    console.print(table)
 
 
 @app.command(name="fit-surface")

@@ -13,6 +13,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `CHANGELOG.md` and `RELEASING.md` (one-time PyPI trusted-publisher setup and
   the tagging steps).
 - Project URLs (Changelog, Issues) in the package metadata.
+- American option pricing in `black_scholes.american`: a Cox-Ross-Rubinstein
+  binomial tree with early exercise and continuous dividend yield
+  (`binomial_price`, also able to price the European option on the same tree),
+  the Barone-Adesi and Whaley (1987) quadratic approximation
+  (`barone_adesi_whaley_price`), and `american_price(method="crr" | "baw")`.
+  Tested against Hull's published tree values and Haug's BAW values.
+- `bs american` command: CRR and/or BAW price next to the European price, with
+  the early-exercise premium, `--steps`, `--method` and `--format json`.
 
 ### Changed
 - README: corrected the install route, the SVI formula, and the vega-weighting
