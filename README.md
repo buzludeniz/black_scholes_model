@@ -204,6 +204,36 @@ would eventually turn over: `b` sets the smile, `ρ` the skew, `σ` the wings.
 `fit_relaxed()` lifts guards 2 and 3 so a rejected fit can be inspected instead
 of vanishing.
 
+### Term structure across expiries
+
+`black_scholes.term_structure.TermStructure` stacks one SVI slice per expiry,
+rejects calendar-spread arbitrage between every pair of adjacent expiries, and
+interpolates total implied variance linearly in time (flat forward variance
+between expiries) so an implied volatility can be read at any `(k, T)` inside
+the quoted range:
+
+```python
+from black_scholes.surface import SVICurve
+from black_scholes.term_structure import TermStructure
+
+ts = TermStructure.from_slices(
+    {
+        0.5: SVICurve(0.02, 0.10, -0.30, 0.0, 0.15),
+        1.0: SVICurve(0.04, 0.10, -0.30, 0.0, 0.15),
+    }
+)
+ts.implied_volatility(k=0.0, maturity=0.75)  # 0.2449...
+```
+
+`TermStructure.from_surfaces([...])` fits each single-expiry `VolSurface` and
+stacks the results. The calendar check needs two things per adjacent pair: the
+slices must not cross, *and* the later slice must lie above the earlier one (a
+uniformly lower later slice never crosses but is still arbitrage). Maturities
+outside `[first expiry, last expiry]` raise `ValueError` rather than
+extrapolate. Linear interpolation in total variance preserves calendar
+no-arbitrage but not necessarily butterfly no-arbitrage of the intermediate
+smiles; `ts.butterfly_arbitrage_free(T)` checks one.
+
 ## Development
 
 ```bash
@@ -249,12 +279,12 @@ Honest inventory of what is still not done:
   raw SVI, and SSVI's closed-form conditions come from a stricter
   parameterisation that cannot fit every quoted smile. A finer grid can find
   more violations, never fewer.
-- **No multi-expiry term-structure object.** `calendar_arbitrage_free` checks a
-  pair of slices. Assembling and validating a whole surface of maturities is
-  left to the caller.
+- **No extrapolation in time.** `TermStructure` interpolates between the quoted
+  expiries only; maturities before the first or after the last are rejected.
 - **No SABR or eSSVI.** SVI only.
-- **Single-expiry fitting only.** Multi-expiry surfaces are assembled by the
-  caller, one slice per expiry.
+- **Slices are fitted independently.** `TermStructure.from_surfaces` fits each
+  expiry on its own and then checks calendar arbitrage; it does not fit the
+  expiries jointly under a calendar constraint.
 - **No American Greeks.** `black_scholes.american` prices American options
   but does not compute their Greeks; Bermudan exercise is not supported.
 

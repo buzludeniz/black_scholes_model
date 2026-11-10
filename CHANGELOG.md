@@ -13,6 +13,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `CHANGELOG.md` and `RELEASING.md` (one-time PyPI trusted-publisher setup and
   the tagging steps).
 - Project URLs (Changelog, Issues) in the package metadata.
+- `black_scholes.term_structure.TermStructure`: a multi-expiry surface built
+  from SVI slices by expiry (`from_slices`, or `from_surfaces` to fit each
+  `VolSurface`). Every adjacent pair of expiries is checked for calendar
+  arbitrage, reusing `SVICurve.calendar_arbitrage_free` for crossings and adding
+  an ordering check for a later slice lying wholly below an earlier one;
+  `calendar_violations()` lists the offending pairs. Total implied variance is
+  interpolated linearly in time between expiries, and `implied_volatility(k, T)`
+  is available for any `T` inside the quoted range. Maturities outside it are
+  rejected rather than extrapolated. `butterfly_arbitrage_free(T)` checks an
+  interpolated smile.
 - American option pricing in `black_scholes.american`: a Cox-Ross-Rubinstein
   binomial tree with early exercise and continuous dividend yield
   (`binomial_price`, also able to price the European option on the same tree),
